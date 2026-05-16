@@ -1,6 +1,8 @@
 package com.caloriefree.app
 
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -173,6 +175,13 @@ data class AiPresetSection(
     val groups: List<AiPresetGroup>
 )
 
+data class UpdateInfo(
+    val versionCode: Int,
+    val versionName: String,
+    val url: String,
+    val changelog: String
+)
+
 data class AppState(
     val targetCalories: Int,
     val targetProtein: Int,
@@ -221,6 +230,9 @@ fun CalorieFreeApp() {
     var mealEditorState by remember { mutableStateOf<MealEditorState?>(null) }
     var aiSettings by remember { mutableStateOf(AiSettings()) }
     var showAiSettingsDialog by remember { mutableStateOf(false) }
+    var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
+    var updateErrorText by remember { mutableStateOf<String?>(null) }
+    val currentVersionCode = remember { currentAppVersionCode(context) }
     val meals = remember { mutableStateListOf<MealRecord>() }
     val foods = remember { mutableStateListOf<FoodItem>() }
     val tags = remember { mutableStateListOf("早餐", "午餐", "晚餐", "零食") }
@@ -228,6 +240,18 @@ fun CalorieFreeApp() {
     val dailyPlanSelections = remember { mutableStateListOf<DailyPlanSelection>() }
     val waterRecords = remember { mutableStateListOf<WaterRecord>() }
     val aiSettingsList = remember { mutableStateListOf<AiSettings>() }
+
+    LaunchedEffect(Unit) {
+        runCatching { fetchLatestUpdateInfo() }
+            .onSuccess { latest ->
+                if (latest.versionCode > currentVersionCode) {
+                    updateInfo = latest
+                }
+            }
+            .onFailure { error ->
+                updateErrorText = error.message
+            }
+    }
 
     LaunchedEffect(Unit) {
         val appState = loadAppState(context)
@@ -313,6 +337,18 @@ fun CalorieFreeApp() {
             showAiSettingsDialog = false
         }
     )
+
+    updateInfo?.let { latest ->
+        UpdateAvailableDialog(
+            currentVersionCode = currentVersionCode,
+            updateInfo = latest,
+            onDismiss = { updateInfo = null },
+            onOpen = {
+                openUrl(context, latest.url)
+                updateInfo = null
+            }
+        )
+    }
 
     MaterialTheme {
         Surface(modifier = Modifier.fillMaxSize()) {
@@ -1865,6 +1901,48 @@ fun AiSettingsDialog(
             }
         )
     }
+}
+
+@Composable
+fun UpdateAvailableDialog(
+    currentVersionCode: Int,
+    updateInfo: UpdateInfo,
+    onDismiss: () -> Unit,
+    onOpen: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(text = "发现新版本 ${updateInfo.versionName}", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "当前版本号：$currentVersionCode，新版本号：${updateInfo.versionCode}",
+                    fontSize = 13.sp,
+                    color = Color(0xFF6F7785)
+                )
+                Text(
+                    text = updateInfo.changelog.ifBlank { "这个版本没有填写更新说明。" },
+                    fontSize = 14.sp,
+                    color = Color(0xFF303747)
+                )
+                Text(
+                    text = "点击“前往下载”会打开 GitHub Releases 页面，请在浏览器中下载最新版 APK。",
+                    fontSize = 12.sp,
+                    color = Color(0xFF8A92A1)
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = onOpen, shape = RoundedCornerShape(14.dp)) {
+                Text(text = "前往下载")
+            }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onDismiss, shape = RoundedCornerShape(14.dp)) {
+                Text(text = "稍后再说")
+            }
+        }
+    )
 }
 
 @Composable
@@ -5525,6 +5603,51 @@ fun loadAuthorWordsText(context: Context): String {
             reader.readText()
         }
     }.getOrDefault("作者的话暂时无法加载，请确认 Authorswords.md 已打包进 app/src/main/assets。")
+}
+
+fun currentAppVersionCode(context: Context): Int {
+    return runCatching {
+        val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+        if (android.os.Build.VERSION.SDK_INT >= 28) {
+            packageInfo.longVersionCode.toInt()
+        } else {
+            @Suppress("DEPRECATION")
+            packageInfo.versionCode
+        }
+    }.getOrDefault(1)
+}
+
+suspend fun fetchLatestUpdateInfo(): UpdateInfo {
+    return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val requestUrl = "https://raw.githubusercontent.com/guaidaojide666/CalorieFree/main/update.json"
+        val connection = (URL(requestUrl).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 12000
+            readTimeout = 12000
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("Connection", "close")
+        }
+        val responseCode = connection.responseCode
+        val responseText = if (responseCode in 200..299) {
+            connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+        } else {
+            val errorBody = connection.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            throw IllegalStateException("更新检测失败：HTTP $responseCode ${errorBody.take(120)}")
+        }
+        UpdateInfo(
+            versionCode = extractJsonNumber(responseText, "versionCode")?.toInt() ?: 0,
+            versionName = extractJsonString(responseText, "versionName").orEmpty(),
+            url = extractJsonString(responseText, "url").orEmpty().ifBlank { "https://github.com/guaidaojide666/CalorieFree/releases/latest" },
+            changelog = extractJsonString(responseText, "changelog").orEmpty()
+        )
+    }
+}
+
+fun openUrl(context: Context, url: String) {
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    context.startActivity(intent)
 }
 
 fun bitmapToJpegDataUrl(bitmap: Bitmap, maxSide: Int = 1024, quality: Int = 82): String {

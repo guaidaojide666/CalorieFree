@@ -3,6 +3,12 @@
 Run this from the project root:
 
 ```powershell
+.\upload_to_github.bat
+```
+
+Or run the PowerShell script directly:
+
+```powershell
 .\scripts\push_to_github.ps1
 ```
 
