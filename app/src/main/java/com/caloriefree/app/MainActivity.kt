@@ -14,6 +14,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -78,7 +79,10 @@ import kotlin.math.max
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 
-private const val AI_DEVELOPER_MODE = true
+private const val AI_DEVELOPER_MODE = false
+private const val GITHUB_RELEASES_URL = "https://github.com/guaidaojide666/CalorieFree/releases/latest"
+private const val LANZOU_UPDATE_URL = "https://wwbuu.lanzoub.com/b01bjf4c4d"
+private const val LANZOU_UPDATE_PASSWORD = "gzcs"
 
 enum class ServingType {
     PerItem,
@@ -136,6 +140,7 @@ data class NutritionPlan(
     val targetFat: Int,
     val targetCarbs: Int,
     val waterTargetMl: Int = 2000,
+    val dailyCalorieDeficit: Int = 0,
     val isDefault: Boolean = false,
     val note: String = ""
 )
@@ -149,6 +154,12 @@ data class WaterRecord(
     val id: Long,
     val date: String,
     val amountMl: Int
+)
+
+data class ExerciseBurnRecord(
+    val date: String,
+    val calories: Int,
+    val description: String = ""
 )
 
 data class AiSettings(
@@ -193,6 +204,7 @@ data class AppState(
     val plans: List<NutritionPlan> = emptyList(),
     val dailyPlanSelections: List<DailyPlanSelection> = emptyList(),
     val waterRecords: List<WaterRecord> = emptyList(),
+    val exerciseBurnRecords: List<ExerciseBurnRecord> = emptyList(),
     val aiSettings: AiSettings = AiSettings(),
     val aiSettingsList: List<AiSettings> = emptyList()
 )
@@ -231,6 +243,7 @@ fun CalorieFreeApp() {
     var aiSettings by remember { mutableStateOf(AiSettings()) }
     var showAiSettingsDialog by remember { mutableStateOf(false) }
     var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
+    var latestCheckedUpdateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
     var updateErrorText by remember { mutableStateOf<String?>(null) }
     val currentVersionCode = remember { currentAppVersionCode(context) }
     val meals = remember { mutableStateListOf<MealRecord>() }
@@ -239,6 +252,7 @@ fun CalorieFreeApp() {
     val plans = remember { mutableStateListOf<NutritionPlan>() }
     val dailyPlanSelections = remember { mutableStateListOf<DailyPlanSelection>() }
     val waterRecords = remember { mutableStateListOf<WaterRecord>() }
+    val exerciseBurnRecords = remember { mutableStateListOf<ExerciseBurnRecord>() }
     val aiSettingsList = remember { mutableStateListOf<AiSettings>() }
 
     LaunchedEffect(Unit) {
@@ -246,6 +260,8 @@ fun CalorieFreeApp() {
             .onSuccess { latest ->
                 if (latest.versionCode > currentVersionCode) {
                     updateInfo = latest
+                } else {
+                    latestCheckedUpdateInfo = latest
                 }
             }
             .onFailure { error ->
@@ -285,6 +301,8 @@ fun CalorieFreeApp() {
         dailyPlanSelections.addAll(appState.dailyPlanSelections)
         waterRecords.clear()
         waterRecords.addAll(appState.waterRecords)
+        exerciseBurnRecords.clear()
+        exerciseBurnRecords.addAll(appState.exerciseBurnRecords)
         aiSettingsList.clear()
         aiSettingsList.addAll(
             appState.aiSettingsList.ifEmpty {
@@ -295,7 +313,7 @@ fun CalorieFreeApp() {
         hasLoadedStorage = true
     }
 
-    LaunchedEffect(hasLoadedStorage, targetCalories, targetProtein, targetFat, targetCarbs, meals.toList(), foods.toList(), tags.toList(), plans.toList(), dailyPlanSelections.toList(), waterRecords.toList(), aiSettingsList.toList()) {
+    LaunchedEffect(hasLoadedStorage, targetCalories, targetProtein, targetFat, targetCarbs, meals.toList(), foods.toList(), tags.toList(), plans.toList(), dailyPlanSelections.toList(), waterRecords.toList(), exerciseBurnRecords.toList(), aiSettingsList.toList()) {
         if (hasLoadedStorage) {
             saveAppState(
                 context = context,
@@ -309,6 +327,7 @@ fun CalorieFreeApp() {
                 plans = plans,
                 dailyPlanSelections = dailyPlanSelections,
                 waterRecords = waterRecords,
+                exerciseBurnRecords = exerciseBurnRecords,
                 aiSettings = aiSettingsList.firstOrNull() ?: aiSettings,
                 aiSettingsList = aiSettingsList
             )
@@ -325,6 +344,19 @@ fun CalorieFreeApp() {
     val activeWaterTargetMl = currentPlan?.waterTargetMl ?: 2000
     val selectedDateWaterRecords = waterRecords.filter { it.date == selectedDate }
     val drunkWaterMl = selectedDateWaterRecords.sumOf { it.amountMl }
+    val selectedExerciseBurn = exerciseBurnRecords.firstOrNull { it.date == selectedDate }
+    val exerciseCalories = selectedExerciseBurn?.calories ?: 0
+    val exerciseExtraCarbs = exerciseCarbsGrams(exerciseCalories)
+    val exerciseExtraProtein = exerciseProteinGrams(exerciseCalories)
+    val adjustedTargetCalories = activeTargetCalories + exerciseCalories
+    val adjustedTargetProtein = activeTargetProtein + exerciseExtraProtein
+    val adjustedTargetCarbs = activeTargetCarbs + exerciseExtraCarbs
+    val textWorkAiSettings = aiSettingsList.firstOrNull { settings ->
+        settings.enabled &&
+            settings.selectedForTextWork &&
+            settings.apiKey.isNotBlank() &&
+            settings.baseUrl.isNotBlank()
+    }
 
     AiSettingsDialog(
         visible = showAiSettingsDialog,
@@ -350,15 +382,46 @@ fun CalorieFreeApp() {
         )
     }
 
+    latestCheckedUpdateInfo?.let { latest ->
+        UpdateAlreadyLatestDialog(
+            currentVersionCode = currentVersionCode,
+            updateInfo = latest,
+            onDismiss = { latestCheckedUpdateInfo = null }
+        )
+    }
+
+    updateErrorText?.let { errorText ->
+        ManualUpdateFallbackDialog(
+            errorText = errorText,
+            githubUrl = GITHUB_RELEASES_URL,
+            lanzouUrl = LANZOU_UPDATE_URL,
+            lanzouPassword = LANZOU_UPDATE_PASSWORD,
+            onOpenGithub = {
+                openUrl(context, GITHUB_RELEASES_URL)
+                updateErrorText = null
+            },
+            onOpenLanzou = {
+                openUrl(context, LANZOU_UPDATE_URL)
+                updateErrorText = null
+            },
+            onDismiss = { updateErrorText = null }
+        )
+    }
+
     MaterialTheme {
         Surface(modifier = Modifier.fillMaxSize()) {
             when (currentScreen) {
                 Screen.Home -> HomeScreen(
                     planName = currentPlan?.name.orEmpty(),
-                    targetCalories = activeTargetCalories,
-                    targetProtein = activeTargetProtein,
+                    targetCalories = adjustedTargetCalories,
+                    targetProtein = adjustedTargetProtein,
                     targetFat = activeTargetFat,
-                    targetCarbs = activeTargetCarbs,
+                    targetCarbs = adjustedTargetCarbs,
+                    baseTargetCalories = activeTargetCalories,
+                    baseTargetProtein = activeTargetProtein,
+                    baseTargetCarbs = activeTargetCarbs,
+                    exerciseBurnRecord = selectedExerciseBurn,
+                    textWorkAiSettings = textWorkAiSettings,
                     waterTargetMl = activeWaterTargetMl,
                     drunkWaterMl = drunkWaterMl,
                     waterRecords = selectedDateWaterRecords,
@@ -413,6 +476,15 @@ fun CalorieFreeApp() {
                         )
                     },
                     onDeleteWater = { record -> waterRecords.remove(record) },
+                    onSaveExerciseBurn = { record ->
+                        exerciseBurnRecords.removeAll { it.date == selectedDate }
+                        if (record.calories > 0) {
+                            exerciseBurnRecords.add(record.copy(date = selectedDate))
+                        }
+                    },
+                    onClearExerciseBurn = {
+                        exerciseBurnRecords.removeAll { it.date == selectedDate }
+                    },
                     onEditMeal = { meal ->
                         mealEditorState = MealEditorState(meal)
                         currentScreen = Screen.AddMeal
@@ -422,7 +494,6 @@ fun CalorieFreeApp() {
                 )
 
                 Screen.AddMeal -> AddMealScreen(
-                    foods = foods,
                     tags = tags,
                     aiSettingsList = aiSettingsList,
                     initialMeal = mealEditorState?.originalMeal,
@@ -517,6 +588,7 @@ fun CalorieFreeApp() {
                 Screen.History -> HistoryScreen(
                     meals = meals,
                     waterRecords = waterRecords,
+                    exerciseBurnRecords = exerciseBurnRecords,
                     plans = plans,
                     dailyPlanSelections = dailyPlanSelections,
                     selectedDate = selectedDate,
@@ -531,6 +603,10 @@ fun CalorieFreeApp() {
                     selectedDate = selectedDate,
                     plan = currentPlan,
                     meals = meals.filter { it.date == selectedDate },
+                    exerciseBurnRecord = selectedExerciseBurn,
+                    adjustedTargetCalories = adjustedTargetCalories,
+                    adjustedTargetProtein = adjustedTargetProtein,
+                    adjustedTargetCarbs = adjustedTargetCarbs,
                     waterTargetMl = activeWaterTargetMl,
                     drunkWaterMl = drunkWaterMl,
                     aiSettingsList = aiSettingsList,
@@ -590,6 +666,11 @@ fun HomeScreen(
     targetProtein: Int,
     targetFat: Int,
     targetCarbs: Int,
+    baseTargetCalories: Int,
+    baseTargetProtein: Int,
+    baseTargetCarbs: Int,
+    exerciseBurnRecord: ExerciseBurnRecord?,
+    textWorkAiSettings: AiSettings?,
     waterTargetMl: Int,
     drunkWaterMl: Int,
     waterRecords: List<WaterRecord>,
@@ -610,6 +691,8 @@ fun HomeScreen(
     onQuickAddFood: (FoodItem, Double, List<String>) -> Unit,
     onAddWater: (Int) -> Unit,
     onDeleteWater: (WaterRecord) -> Unit,
+    onSaveExerciseBurn: (ExerciseBurnRecord) -> Unit,
+    onClearExerciseBurn: () -> Unit,
     onEditMeal: (MealRecord) -> Unit,
     onDeleteMeal: (MealRecord) -> Unit,
     onClearMeals: () -> Unit
@@ -622,6 +705,7 @@ fun HomeScreen(
     var mealPendingDelete by remember { mutableStateOf<MealRecord?>(null) }
     var showClearConfirm by remember { mutableStateOf(false) }
     var showQuickAddDialog by remember { mutableStateOf(false) }
+    var showExerciseBurnDialog by remember { mutableStateOf(false) }
 
     mealPendingDelete?.let { meal ->
         ConfirmDialog(
@@ -657,6 +741,23 @@ fun HomeScreen(
             onConfirm = { food, quantity, recordTags ->
                 onQuickAddFood(food, quantity, recordTags)
                 showQuickAddDialog = false
+            }
+        )
+    }
+
+    if (showExerciseBurnDialog) {
+        ExerciseBurnDialog(
+            selectedDate = selectedDate,
+            currentRecord = exerciseBurnRecord,
+            textWorkAiSettings = textWorkAiSettings,
+            onDismiss = { showExerciseBurnDialog = false },
+            onSave = { record ->
+                onSaveExerciseBurn(record)
+                showExerciseBurnDialog = false
+            },
+            onClear = {
+                onClearExerciseBurn()
+                showExerciseBurnDialog = false
             }
         )
     }
@@ -705,6 +806,15 @@ fun HomeScreen(
                 targetCalories = targetCalories,
                 eatenCalories = eatenCalories,
                 remainingCalories = remainingCalories
+            )
+
+            ExerciseBurnCard(
+                exerciseBurnRecord = exerciseBurnRecord,
+                baseTargetCalories = baseTargetCalories,
+                adjustedTargetCalories = targetCalories,
+                extraProtein = targetProtein - baseTargetProtein,
+                extraCarbs = targetCarbs - baseTargetCarbs,
+                onClick = { showExerciseBurnDialog = true }
             )
 
             Text(
@@ -871,7 +981,6 @@ fun HomeScreen(
 
 @Composable
 fun AddMealScreen(
-    foods: List<FoodItem>,
     tags: List<String>,
     aiSettingsList: List<AiSettings>,
     initialMeal: MealRecord? = null,
@@ -1004,21 +1113,6 @@ fun AddMealScreen(
                     showAiAnalysisDialog = false
                 }
             )
-
-            if (foods.isNotEmpty()) {
-                QuickPickSection(
-                    foods = foods,
-                    onPick = { food ->
-                        name = food.name
-                        perServingProtein = food.protein.toString()
-                        perServingFat = food.fat.toString()
-                        perServingCarbs = food.carbs.toString()
-                        servingType = food.servingType
-                        inputMode = NutritionInputMode.PerServing
-                        quantityText = ""
-                    }
-                )
-                }
 
             FormCard {
                 Text(
@@ -1946,6 +2040,110 @@ fun UpdateAvailableDialog(
 }
 
 @Composable
+fun UpdateAlreadyLatestDialog(
+    currentVersionCode: Int,
+    updateInfo: UpdateInfo,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(text = "已是最新版本", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "GitHub 更新检测成功，目前没有发现新版本。",
+                    fontSize = 14.sp,
+                    color = Color(0xFF303747)
+                )
+                Text(
+                    text = "当前版本号：$currentVersionCode，线上版本号：${updateInfo.versionCode}",
+                    fontSize = 13.sp,
+                    color = Color(0xFF6F7785)
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss, shape = RoundedCornerShape(14.dp)) {
+                Text(text = "知道了")
+            }
+        }
+    )
+}
+
+@Composable
+fun ManualUpdateFallbackDialog(
+    errorText: String,
+    githubUrl: String,
+    lanzouUrl: String,
+    lanzouPassword: String,
+    onOpenGithub: () -> Unit,
+    onOpenLanzou: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val lanzouQrBitmap = remember { loadLanzouUpdateQrBitmap(context) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(text = "自动检测更新失败", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "可能是当前网络无法连接 GitHub。你可以用下面任意一种方式手动检查更新。",
+                    fontSize = 14.sp,
+                    color = Color(0xFF303747)
+                )
+                Text(
+                    text = "GitHub：$githubUrl",
+                    fontSize = 12.sp,
+                    color = Color(0xFF6F7785)
+                )
+                Text(
+                    text = "蓝奏云：$lanzouUrl\n密码：$lanzouPassword",
+                    fontSize = 12.sp,
+                    color = Color(0xFF6F7785)
+                )
+                if (lanzouQrBitmap != null) {
+                    Image(
+                        bitmap = lanzouQrBitmap.asImageBitmap(),
+                        contentDescription = "蓝奏云更新二维码",
+                        modifier = Modifier
+                            .align(Alignment.CenterHorizontally)
+                            .size(180.dp)
+                            .clip(RoundedCornerShape(18.dp)),
+                        contentScale = ContentScale.Fit
+                    )
+                }
+                if (AI_DEVELOPER_MODE) {
+                    Text(
+                        text = "开发者信息：${errorText.ifBlank { "未知错误" }}",
+                        fontSize = 11.sp,
+                        color = Color(0xFFB45309)
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onOpenLanzou, shape = RoundedCornerShape(14.dp)) {
+                Text(text = "打开蓝奏云")
+            }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = onOpenGithub, shape = RoundedCornerShape(14.dp)) {
+                    Text(text = "打开 GitHub")
+                }
+                OutlinedButton(onClick = onDismiss, shape = RoundedCornerShape(14.dp)) {
+                    Text(text = "稍后再说")
+                }
+            }
+        }
+    )
+}
+
+@Composable
 fun AiMealAnalysisDialog(
     visible: Boolean,
     aiSettingsList: List<AiSettings>,
@@ -2241,6 +2439,7 @@ fun AiMealAnalysisDialog(
 fun HistoryScreen(
     meals: List<MealRecord>,
     waterRecords: List<WaterRecord>,
+    exerciseBurnRecords: List<ExerciseBurnRecord>,
     plans: List<NutritionPlan>,
     dailyPlanSelections: List<DailyPlanSelection>,
     selectedDate: String,
@@ -2248,13 +2447,12 @@ fun HistoryScreen(
     onSelectDate: (String) -> Unit
 ) {
     BackHandler(onBack = onBack)
-    val allRecordDates = (meals.map { it.date } + waterRecords.map { it.date })
+    val allRecordDates = (meals.map { it.date } + waterRecords.map { it.date } + exerciseBurnRecords.map { it.date })
         .distinct()
         .sortedDescending()
     var visibleMonth by remember(selectedDate) { mutableStateOf(selectedDate.take(7)) }
-    val visibleRecordDates = allRecordDates.filter { it.startsWith(visibleMonth) }
     val visibleMonthMeals = meals.filter { it.date.startsWith(visibleMonth) }
-    val visibleMonthWaterRecords = waterRecords.filter { it.date.startsWith(visibleMonth) }
+    val visibleMonthExerciseBurnRecords = exerciseBurnRecords.filter { it.date.startsWith(visibleMonth) }
 
     AppBackground {
         Column(
@@ -2272,7 +2470,7 @@ fun HistoryScreen(
                 color = Color(0xFF161A23)
             )
             Text(
-                text = "按月份查看摄入概览。",
+                text = "用真正的月历查看每天的饮食、饮水和运动消耗。",
                 fontSize = 15.sp,
                 color = Color(0xFF6F7785)
             )
@@ -2287,35 +2485,26 @@ fun HistoryScreen(
             MonthSummaryCard(
                 visibleMonth = visibleMonth,
                 meals = visibleMonthMeals,
-                waterRecords = visibleMonthWaterRecords,
-                recordDates = visibleRecordDates
+                plans = plans,
+                dailyPlanSelections = dailyPlanSelections,
+                exerciseBurnRecords = visibleMonthExerciseBurnRecords
             )
+
+            CalendarMonthCard(
+                visibleMonth = visibleMonth,
+                selectedDate = selectedDate,
+                meals = meals,
+                waterRecords = waterRecords,
+                exerciseBurnRecords = exerciseBurnRecords,
+                plans = plans,
+                dailyPlanSelections = dailyPlanSelections,
+                onSelectDate = onSelectDate
+            )
+
+            CalendarLegendCard()
 
             if (allRecordDates.isEmpty()) {
                 EmptyHistoryCard()
-            } else if (visibleRecordDates.isEmpty()) {
-                EmptyMonthCard(visibleMonth)
-            } else {
-                visibleRecordDates.forEach { date ->
-                    val records = meals.filter { it.date == date }
-                    val selectedPlanId = dailyPlanSelections.firstOrNull { it.date == date }?.planId
-                    val selectedPlan = plans.firstOrNull { it.id == selectedPlanId }
-                    val waterMl = waterRecords.filter { it.date == date }.sumOf { it.amountMl }
-                    val planStatusText = when {
-                        selectedPlanId == null -> "未选择计划"
-                        selectedPlan != null -> "计划：${selectedPlan.name}"
-                        else -> "计划出错"
-                    }
-                    HistoryDateCard(
-                        date = date,
-                        isSelected = date == selectedDate,
-                        meals = records,
-                        waterMl = waterMl,
-                        planStatusText = planStatusText,
-                        targetCalories = selectedPlan?.targetCalories,
-                        onClick = { onSelectDate(date) }
-                    )
-                }
             }
 
             OutlinedButton(
@@ -2551,6 +2740,7 @@ fun PlanScreen(
     var fat by remember { mutableStateOf("") }
     var carbs by remember { mutableStateOf("") }
     var waterTargetMl by remember { mutableStateOf("2000") }
+    var dailyCalorieDeficit by remember { mutableStateOf("0") }
     var note by remember { mutableStateOf("") }
     var errorText by remember { mutableStateOf<String?>(null) }
     var pendingDeletePlanId by remember { mutableStateOf<Long?>(null) }
@@ -2579,6 +2769,7 @@ fun PlanScreen(
                         fat = ""
                         carbs = ""
                         waterTargetMl = "2000"
+                        dailyCalorieDeficit = "0"
                         note = ""
                     }
                     pendingDeletePlanId = null
@@ -2626,6 +2817,7 @@ fun PlanScreen(
                         fat = ""
                         carbs = ""
                         waterTargetMl = "2000"
+                        dailyCalorieDeficit = "0"
                         note = ""
                         errorText = null
                     },
@@ -2666,7 +2858,7 @@ fun PlanScreen(
                                 }
                             }
                             Text(
-                                text = "${plan.targetCalories} kcal · 蛋白${plan.targetProtein}g 脂肪${plan.targetFat}g 碳水${plan.targetCarbs}g · 饮水${plan.waterTargetMl}ml",
+                                text = "${plan.targetCalories} kcal · 蛋白${plan.targetProtein}g 脂肪${plan.targetFat}g 碳水${plan.targetCarbs}g · 饮水${plan.waterTargetMl}ml · 缺口${plan.dailyCalorieDeficit}kcal",
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = Color(0xFF303747)
@@ -2692,6 +2884,7 @@ fun PlanScreen(
                                         fat = plan.targetFat.toString()
                                         carbs = plan.targetCarbs.toString()
                                         waterTargetMl = plan.waterTargetMl.toString()
+                                        dailyCalorieDeficit = plan.dailyCalorieDeficit.toString()
                                         note = plan.note
                                         errorText = null
                                     },
@@ -2723,6 +2916,12 @@ fun PlanScreen(
                     AppTextField(label = "目标蛋白质 g", value = protein, onValueChange = { protein = it }, isNumber = true)
                     AppTextField(label = "目标脂肪 g", value = fat, onValueChange = { fat = it }, isNumber = true)
                     AppTextField(label = "饮水目标 ml", value = waterTargetMl, onValueChange = { waterTargetMl = it }, isNumber = true)
+                    AppTextField(label = "热量缺口 kcal", value = dailyCalorieDeficit, onValueChange = { dailyCalorieDeficit = it }, isNumber = true)
+                    Text(
+                        text = "热量缺口表示这个计划本身预计每天能带来多少热量缺口。月度总结会把它和每天实际少吃/多吃的部分一起累计。",
+                        fontSize = 12.sp,
+                        color = Color(0xFF8A92A1)
+                    )
                     AppTextField(label = "备注", value = note, onValueChange = { note = it })
                     Text(
                         text = "自动计算目标热量：$previewCalories kcal（蛋白质×4 + 脂肪×9 + 碳水×4）",
@@ -2742,17 +2941,18 @@ fun PlanScreen(
                         val parsedFat = fat.toIntOrNull()
                         val parsedCarbs = carbs.toIntOrNull()
                         val parsedWater = waterTargetMl.toIntOrNull()
+                        val parsedDailyCalorieDeficit = dailyCalorieDeficit.toIntOrNull()
 
                         if (name.isBlank()) {
                             errorText = "请输入计划名称"
                             return@Button
                         }
-                        if (parsedProtein == null || parsedFat == null || parsedCarbs == null || parsedWater == null) {
+                        if (parsedProtein == null || parsedFat == null || parsedCarbs == null || parsedWater == null || parsedDailyCalorieDeficit == null) {
                             errorText = "请输入有效计划数据"
                             return@Button
                         }
-                        if (parsedProtein < 0 || parsedFat < 0 || parsedCarbs < 0 || parsedWater <= 0) {
-                            errorText = "目标值不能为负数，饮水目标需大于 0"
+                        if (parsedProtein < 0 || parsedFat < 0 || parsedCarbs < 0 || parsedWater <= 0 || parsedDailyCalorieDeficit < 0) {
+                            errorText = "目标值和热量缺口不能为负数，饮水目标需大于 0"
                             return@Button
                         }
 
@@ -2771,6 +2971,7 @@ fun PlanScreen(
                                 targetFat = parsedFat,
                                 targetCarbs = parsedCarbs,
                                 waterTargetMl = parsedWater,
+                                dailyCalorieDeficit = parsedDailyCalorieDeficit,
                                 isDefault = plans.none { it.isDefault } && editingPlanId == null,
                                 note = note.trim()
                             )
@@ -2782,6 +2983,7 @@ fun PlanScreen(
                         fat = ""
                         carbs = ""
                         waterTargetMl = "2000"
+                        dailyCalorieDeficit = "0"
                         note = ""
                         errorText = null
                     },
@@ -2812,6 +3014,10 @@ fun ReportScreen(
     selectedDate: String,
     plan: NutritionPlan?,
     meals: List<MealRecord>,
+    exerciseBurnRecord: ExerciseBurnRecord?,
+    adjustedTargetCalories: Int,
+    adjustedTargetProtein: Int,
+    adjustedTargetCarbs: Int,
     waterTargetMl: Int,
     drunkWaterMl: Int,
     aiSettingsList: List<AiSettings>,
@@ -2823,19 +3029,19 @@ fun ReportScreen(
     val consumedProtein = meals.sumOf { it.protein }
     val consumedFat = meals.sumOf { it.fat }
     val consumedCarbs = meals.sumOf { it.carbs }
-    val targetCalories = plan?.targetCalories ?: 0
-    val targetProtein = plan?.targetProtein ?: 0
+    val targetCalories = adjustedTargetCalories
+    val targetProtein = adjustedTargetProtein
     val targetFat = plan?.targetFat ?: 0
-    val targetCarbs = plan?.targetCarbs ?: 0
+    val targetCarbs = adjustedTargetCarbs
     val remainingCalories = targetCalories - consumedCalories
     val remainingProtein = targetProtein - consumedProtein
     val remainingFat = targetFat - consumedFat
     val remainingCarbs = targetCarbs - consumedCarbs
     val remainingWater = waterTargetMl - drunkWaterMl
     val reportAiSettings = aiSettingsList.firstOrNull { it.enabled && it.selectedForTextWork && it.apiKey.isNotBlank() && it.baseUrl.isNotBlank() }
-    var aiReportText by remember(selectedDate, meals, plan, drunkWaterMl, reportAiSettings) { mutableStateOf<String?>(null) }
-    var aiReportError by remember(selectedDate, meals, plan, drunkWaterMl, reportAiSettings) { mutableStateOf<String?>(null) }
-    var isGeneratingAiReport by remember(selectedDate, meals, plan, drunkWaterMl, reportAiSettings) { mutableStateOf(false) }
+    var aiReportText by remember(selectedDate, meals, plan, exerciseBurnRecord, drunkWaterMl, reportAiSettings) { mutableStateOf<String?>(null) }
+    var aiReportError by remember(selectedDate, meals, plan, exerciseBurnRecord, drunkWaterMl, reportAiSettings) { mutableStateOf<String?>(null) }
+    var isGeneratingAiReport by remember(selectedDate, meals, plan, exerciseBurnRecord, drunkWaterMl, reportAiSettings) { mutableStateOf(false) }
 
     AppBackground {
         Column(
@@ -2864,7 +3070,7 @@ fun ReportScreen(
                         "今天还没有饮食记录。建议先添加早餐、午餐、晚餐或加餐记录，再查看完整分析。"
                     } else {
                         "今天共记录 ${meals.size} 条饮食，已摄入 $consumedCalories kcal。" +
-                            if (plan != null) " 当前计划为「${plan.name}」，目标 $targetCalories kcal。" else " 当前还没有可用计划。"
+                            if (plan != null) " 当前计划为「${plan.name}」，运动补回后目标 $targetCalories kcal。" else " 当前还没有可用计划。"
                     },
                     fontSize = 14.sp,
                     color = Color(0xFF303747)
@@ -2873,6 +3079,9 @@ fun ReportScreen(
 
             ReportSectionCard(title = "热量状态") {
                 ReportMetricRow(label = "目标热量", value = if (targetCalories > 0) "$targetCalories kcal" else "未设置")
+                if ((exerciseBurnRecord?.calories ?: 0) > 0) {
+                    ReportMetricRow(label = "额外运动消耗", value = "+${exerciseBurnRecord?.calories ?: 0} kcal")
+                }
                 ReportMetricRow(label = "已摄入", value = "$consumedCalories kcal")
                 ReportMetricRow(
                     label = if (remainingCalories >= 0) "剩余可摄入" else "已超出",
@@ -2890,6 +3099,13 @@ fun ReportScreen(
                     fontSize = 13.sp,
                     color = Color(0xFF6F7785)
                 )
+                if ((exerciseBurnRecord?.calories ?: 0) > 0) {
+                    Text(
+                        text = "补回公式：运动消耗热量补充 = 85% 碳水 + 15% 蛋白质。",
+                        fontSize = 12.sp,
+                        color = Color(0xFF8A5A00)
+                    )
+                }
             }
 
             ReportSectionCard(title = "宏量营养素缺口") {
@@ -2961,6 +3177,7 @@ fun ReportScreen(
                             selectedDate = selectedDate,
                             plan = plan,
                             meals = meals,
+                            exerciseBurnRecord = exerciseBurnRecord,
                             waterTargetMl = waterTargetMl,
                             drunkWaterMl = drunkWaterMl
                         )
@@ -3451,6 +3668,197 @@ fun SummaryItem(label: String, value: String) {
 }
 
 @Composable
+fun ExerciseBurnCard(
+    exerciseBurnRecord: ExerciseBurnRecord?,
+    baseTargetCalories: Int,
+    adjustedTargetCalories: Int,
+    extraProtein: Int,
+    extraCarbs: Int,
+    onClick: () -> Unit
+) {
+    val exerciseCalories = exerciseBurnRecord?.calories ?: 0
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xBFFFFFFF))
+    ) {
+        Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "额外运动消耗",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFF161A23)
+                    )
+                    Text(
+                        text = if (exerciseCalories > 0) {
+                            "今日额外消耗 $exerciseCalories kcal，已自动加到当日额度"
+                        } else {
+                            "力量训练、有氧训练的额外消耗可以在这里补回"
+                        },
+                        fontSize = 13.sp,
+                        color = Color(0xFF6F7785)
+                    )
+                }
+                OutlinedButton(onClick = onClick, shape = RoundedCornerShape(14.dp)) {
+                    Text(text = if (exerciseCalories > 0) "修改" else "设置", fontSize = 12.sp)
+                }
+            }
+            Text(
+                text = "补回公式：运动消耗热量补充 = 85% 碳水 + 15% 蛋白质。",
+                fontSize = 12.sp,
+                color = Color(0xFF8A5A00)
+            )
+            val record = exerciseBurnRecord
+            if (record != null && exerciseCalories > 0) {
+                Text(
+                    text = "基础 $baseTargetCalories kcal → 今日 $adjustedTargetCalories kcal；额外碳水 +${extraCarbs.coerceAtLeast(0)}g，蛋白 +${extraProtein.coerceAtLeast(0)}g。",
+                    fontSize = 12.sp,
+                    color = Color(0xFF6F7785)
+                )
+                if (record.description.isNotBlank()) {
+                    Text(
+                        text = "描述：${record.description}",
+                        fontSize = 12.sp,
+                        color = Color(0xFF8A92A1)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ExerciseBurnDialog(
+    selectedDate: String,
+    currentRecord: ExerciseBurnRecord?,
+    textWorkAiSettings: AiSettings?,
+    onDismiss: () -> Unit,
+    onSave: (ExerciseBurnRecord) -> Unit,
+    onClear: () -> Unit
+) {
+    val coroutineScope = rememberCoroutineScope()
+    var caloriesText by remember(currentRecord) { mutableStateOf(currentRecord?.calories?.takeIf { it > 0 }?.toString().orEmpty()) }
+    var descriptionText by remember(currentRecord) { mutableStateOf(currentRecord?.description.orEmpty()) }
+    var isEstimating by remember { mutableStateOf(false) }
+    var errorText by remember { mutableStateOf<String?>(null) }
+    val parsedCalories = caloriesText.toIntOrNull()?.coerceAtLeast(0) ?: 0
+    val extraCarbs = exerciseCarbsGrams(parsedCalories)
+    val extraProtein = exerciseProteinGrams(parsedCalories)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(text = "额外运动消耗", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "$selectedDate 的力量训练、有氧训练等额外运动消耗。保存后会直接加到当天额度里。",
+                    fontSize = 13.sp,
+                    color = Color(0xFF6F7785)
+                )
+                AppTextField(
+                    label = "运动消耗热量 kcal（可手动填写）",
+                    value = caloriesText,
+                    onValueChange = { caloriesText = it.filter(Char::isDigit).take(5) },
+                    isNumber = true
+                )
+                OutlinedTextField(
+                    value = descriptionText,
+                    onValueChange = { descriptionText = it.take(400) },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(text = "运动描述（可选，用于 AI 估算）") },
+                    placeholder = { Text(text = "例如：力量训练 60 分钟，深蹲卧推较多；跑步 30 分钟，配速 7 分钟/km") },
+                    minLines = 3,
+                    shape = RoundedCornerShape(16.dp)
+                )
+                Text(
+                    text = "补回公式：运动消耗热量补充 = 85% 碳水 + 15% 蛋白质。",
+                    fontSize = 12.sp,
+                    color = Color(0xFF8A5A00)
+                )
+                Text(
+                    text = "当前会额外加入：热量 +${parsedCalories} kcal，碳水 +${extraCarbs}g，蛋白 +${extraProtein}g，脂肪不变。",
+                    fontSize = 12.sp,
+                    color = Color(0xFF303747)
+                )
+                Button(
+                    onClick = {
+                        val settings = textWorkAiSettings
+                        if (settings == null) {
+                            errorText = "当前没有可用文字生成工作 AI，请先在 AI 设置里启用。"
+                            return@Button
+                        }
+                        if (descriptionText.isBlank()) {
+                            errorText = "请先输入运动描述，再让 AI 估算。"
+                            return@Button
+                        }
+                        isEstimating = true
+                        errorText = null
+                        coroutineScope.launch {
+                            val result = runCatching {
+                                requestAiExerciseCalories(
+                                    settings = settings,
+                                    selectedDate = selectedDate,
+                                    description = descriptionText
+                                )
+                            }
+                            result.onSuccess { estimatedCalories ->
+                                caloriesText = estimatedCalories.coerceAtLeast(0).toString()
+                            }.onFailure { error ->
+                                errorText = friendlyAiReportErrorMessage(error)
+                            }
+                            isEstimating = false
+                        }
+                    },
+                    enabled = !isEstimating,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Text(text = if (isEstimating) "AI 估算中..." else "用文字工作 AI 估算消耗", fontSize = 13.sp)
+                }
+                errorText?.let {
+                    Text(text = it, fontSize = 12.sp, color = Color(0xFFEF5350))
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    onSave(
+                        ExerciseBurnRecord(
+                            date = selectedDate,
+                            calories = parsedCalories,
+                            description = descriptionText.trim()
+                        )
+                    )
+                },
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Text(text = "保存")
+            }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (currentRecord != null) {
+                    OutlinedButton(onClick = onClear, shape = RoundedCornerShape(14.dp)) {
+                        Text(text = "清除")
+                    }
+                }
+                OutlinedButton(onClick = onDismiss, shape = RoundedCornerShape(14.dp)) {
+                    Text(text = "取消")
+                }
+            }
+        }
+    )
+}
+
+@Composable
 fun WaterSummaryCard(
     waterTargetMl: Int,
     drunkWaterMl: Int,
@@ -3809,16 +4217,25 @@ fun MonthNavigatorCard(
 fun MonthSummaryCard(
     visibleMonth: String,
     meals: List<MealRecord>,
-    waterRecords: List<WaterRecord>,
-    recordDates: List<String>
+    plans: List<NutritionPlan>,
+    dailyPlanSelections: List<DailyPlanSelection>,
+    exerciseBurnRecords: List<ExerciseBurnRecord>
 ) {
-    val totalCalories = meals.sumOf { it.calories }
-    val totalProtein = meals.sumOf { it.protein }
-    val totalFat = meals.sumOf { it.fat }
-    val totalCarbs = meals.sumOf { it.carbs }
-    val totalWaterMl = waterRecords.sumOf { it.amountMl }
-    val mealDays = meals.map { it.date }.distinct().size
-    val averageCalories = if (mealDays > 0) totalCalories / mealDays else 0
+    val recordedMealDates = meals
+        .map { it.date }
+        .filter { it.startsWith(visibleMonth) }
+        .distinct()
+    val totalDeficit = recordedMealDates.sumOf { date ->
+        val plan = planForDate(date, plans, dailyPlanSelections)
+        val baseTargetCalories = plan?.targetCalories ?: 0
+        val exerciseCalories = exerciseBurnRecords.firstOrNull { it.date == date }?.calories ?: 0
+        val adjustedTargetCalories = baseTargetCalories + exerciseCalories
+        val consumedCalories = meals.filter { it.date == date }.sumOf { it.calories }
+        val actualDeficit = if (adjustedTargetCalories > 0) adjustedTargetCalories - consumedCalories else 0
+        (plan?.dailyCalorieDeficit ?: 0) + actualDeficit
+    }
+    val estimatedFatKg = totalDeficit / 7700.0
+    val fatText = String.format(Locale.getDefault(), "%.2f kg", estimatedFatKg)
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -3828,23 +4245,177 @@ fun MonthSummaryCard(
     ) {
         Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(text = "$visibleMonth 月度汇总", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color(0xFF161A23))
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                SummaryItem(label = "记录天数", value = "${recordDates.size}")
-                SummaryItem(label = "总热量", value = "$totalCalories")
-                SummaryItem(label = "日均", value = "$averageCalories")
-            }
+            SummaryItem(label = "累计热量缺口", value = "${totalDeficit} kcal")
+            SummaryItem(label = "估算减少脂肪", value = fatText)
             Text(
-                text = "蛋白${totalProtein}g · 脂肪${totalFat}g · 碳水${totalCarbs}g · 饮水${totalWaterMl}ml",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = Color(0xFF303747)
-            )
-            Text(
-                text = if (recordDates.isEmpty()) "本月还没有记录。" else "本月共有 ${recordDates.size} 天存在饮食或饮水记录，其中 $mealDays 天记录了饮食。",
+                text = "只统计有饮食记录的日期。按 1 kg 脂肪约等于 7700 kcal 估算；未达到计划会增加缺口，超出计划会抵消缺口。",
                 fontSize = 13.sp,
                 color = Color(0xFF8A92A1)
             )
         }
+    }
+}
+
+@Composable
+fun CalendarMonthCard(
+    visibleMonth: String,
+    selectedDate: String,
+    meals: List<MealRecord>,
+    waterRecords: List<WaterRecord>,
+    exerciseBurnRecords: List<ExerciseBurnRecord>,
+    plans: List<NutritionPlan>,
+    dailyPlanSelections: List<DailyPlanSelection>,
+    onSelectDate: (String) -> Unit
+) {
+    val calendarDays = calendarCellsForMonth(visibleMonth)
+    val weekLabels = listOf("一", "二", "三", "四", "五", "六", "日")
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xCCFFFFFF)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 5.dp)
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                weekLabels.forEach { label ->
+                    Text(
+                        text = label,
+                        modifier = Modifier.weight(1f),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF8A92A1)
+                    )
+                }
+            }
+            calendarDays.chunked(7).forEach { week ->
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    week.forEach { date ->
+                        CalendarDayCell(
+                            date = date,
+                            visibleMonth = visibleMonth,
+                            selectedDate = selectedDate,
+                            meals = meals.filter { it.date == date },
+                            waterMl = waterRecords.filter { it.date == date }.sumOf { it.amountMl },
+                            exerciseCalories = exerciseBurnRecords.firstOrNull { it.date == date }?.calories ?: 0,
+                            targetCalories = targetCaloriesForDate(date, plans, dailyPlanSelections),
+                            onClick = { onSelectDate(date) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun CalendarDayCell(
+    date: String,
+    visibleMonth: String,
+    selectedDate: String,
+    meals: List<MealRecord>,
+    waterMl: Int,
+    exerciseCalories: Int,
+    targetCalories: Int?,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val isCurrentMonth = date.startsWith(visibleMonth)
+    val isToday = date == currentDateText()
+    val isSelected = date == selectedDate
+    val calories = meals.sumOf { it.calories }
+    val hasMeal = meals.isNotEmpty()
+    val hasWater = waterMl > 0
+    val hasExercise = exerciseCalories > 0
+    val statusColor = calorieStatusColor(calories, targetCalories)
+    val backgroundColor = when {
+        isSelected -> Color(0xFFE7F0FF)
+        isToday -> Color(0xFFFFF3D8)
+        isCurrentMonth -> Color(0xFFFFFFFF)
+        else -> Color(0x66FFFFFF)
+    }
+    val borderColor = when {
+        isSelected -> Color(0xFF5B8DEF)
+        isToday -> Color(0xFFFFA726)
+        else -> Color.Transparent
+    }
+
+    Card(
+        modifier = modifier
+            .height(88.dp)
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = backgroundColor),
+        border = BorderStroke(1.dp, borderColor)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(7.dp),
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = date.takeLast(2).trimStart('0').ifBlank { "1" },
+                fontSize = 14.sp,
+                fontWeight = if (isSelected || isToday) FontWeight.Bold else FontWeight.SemiBold,
+                color = if (isCurrentMonth) Color(0xFF161A23) else Color(0xFFB4BBC8)
+            )
+            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                if (hasMeal) {
+                    Text(
+                        text = "$calories",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = statusColor
+                    )
+                } else {
+                    Text(text = " ", fontSize = 10.sp)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                    CalendarDot(visible = hasMeal, color = Color(0xFF5B8DEF))
+                    CalendarDot(visible = hasWater, color = Color(0xFF29B6F6))
+                    CalendarDot(visible = hasExercise, color = Color(0xFFFF8A50))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun CalendarDot(visible: Boolean, color: Color) {
+    Box(
+        modifier = Modifier
+            .size(6.dp)
+            .clip(CircleShape)
+            .background(if (visible) color else Color.Transparent)
+    )
+}
+
+@Composable
+fun CalendarLegendCard() {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xBFFFFFFF))
+    ) {
+        Row(
+            modifier = Modifier.padding(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            CalendarLegendItem(color = Color(0xFF5B8DEF), text = "饮食")
+            CalendarLegendItem(color = Color(0xFF29B6F6), text = "饮水")
+            CalendarLegendItem(color = Color(0xFFFF8A50), text = "运动")
+        }
+    }
+}
+
+@Composable
+fun CalendarLegendItem(color: Color, text: String) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        CalendarDot(visible = true, color = color)
+        Text(text = text, fontSize = 12.sp, color = Color(0xFF6F7785))
     }
 }
 
@@ -5094,12 +5665,13 @@ suspend fun requestAiNutritionReport(
     selectedDate: String,
     plan: NutritionPlan?,
     meals: List<MealRecord>,
+    exerciseBurnRecord: ExerciseBurnRecord?,
     waterTargetMl: Int,
     drunkWaterMl: Int
 ): String {
     return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
         withTransientAiRetry {
-        val prompt = buildAiNutritionReportPrompt(selectedDate, plan, meals, waterTargetMl, drunkWaterMl)
+        val prompt = buildAiNutritionReportPrompt(selectedDate, plan, meals, exerciseBurnRecord, waterTargetMl, drunkWaterMl)
         val payload = if (providerNeedsAnthropicVersion(settings)) {
             buildAnthropicPayload(settings, prompt)
         } else if (providerLooksZhipuLike(settings)) {
@@ -5135,6 +5707,53 @@ suspend fun requestAiNutritionReport(
         extractAiMessageContent(responseText).trim().ifBlank {
             throw IllegalStateException("AI 返回内容为空")
         }
+        }
+    }
+}
+
+suspend fun requestAiExerciseCalories(
+    settings: AiSettings,
+    selectedDate: String,
+    description: String
+): Int {
+    return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        withTransientAiRetry {
+        val prompt = buildAiExerciseCaloriesPrompt(selectedDate, description)
+        val payload = if (providerNeedsAnthropicVersion(settings)) {
+            buildAnthropicPayload(settings, prompt)
+        } else if (providerLooksZhipuLike(settings)) {
+            buildZhipuPayload(settings, prompt)
+        } else {
+            buildOpenAiCompatiblePayload(settings, prompt)
+        }
+        val requestUrl = normalizeAiBaseUrl(settings.baseUrl, providerLooksAnthropicLike(settings), providerLooksGeminiLike(settings), providerLooksZhipuLike(settings))
+            ?: throw IllegalStateException("AI 接口地址格式不正确，请到 AI 设置中重新填写 http/https 地址。")
+        val connection = (URL(requestUrl).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 30000
+            readTimeout = 60000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            setRequestProperty("Authorization", "Bearer ${settings.apiKey}")
+            setRequestProperty("Connection", "close")
+            if (providerNeedsAnthropicVersion(settings)) {
+                setRequestProperty("x-api-key", settings.apiKey)
+                setRequestProperty("anthropic-version", "2023-06-01")
+            }
+        }
+        OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { writer ->
+            writer.write(payload)
+        }
+        val responseCode = connection.responseCode
+        val responseText = if (responseCode in 200..299) {
+            connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+        } else {
+            val errorBody = connection.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            throw IllegalStateException("AI 请求失败：HTTP $responseCode ${errorBody.take(160)}")
+        }
+        val content = extractAiMessageContent(responseText).trim()
+        parseExerciseCaloriesFromText(content)
+            ?: throw IllegalStateException("文字生成工作 AI 返回内容无法解析为运动消耗：${content.take(120)}")
         }
     }
 }
@@ -5194,6 +5813,7 @@ fun buildAiNutritionReportPrompt(
     selectedDate: String,
     plan: NutritionPlan?,
     meals: List<MealRecord>,
+    exerciseBurnRecord: ExerciseBurnRecord?,
     waterTargetMl: Int,
     drunkWaterMl: Int
 ): String {
@@ -5201,6 +5821,10 @@ fun buildAiNutritionReportPrompt(
     val consumedProtein = meals.sumOf { it.protein }
     val consumedFat = meals.sumOf { it.fat }
     val consumedCarbs = meals.sumOf { it.carbs }
+    val exerciseCalories = exerciseBurnRecord?.calories ?: 0
+    val adjustedTargetCalories = (plan?.targetCalories ?: 0) + exerciseCalories
+    val adjustedTargetProtein = (plan?.targetProtein ?: 0) + exerciseProteinGrams(exerciseCalories)
+    val adjustedTargetCarbs = (plan?.targetCarbs ?: 0) + exerciseCarbsGrams(exerciseCalories)
     val mealLines = meals.joinToString("\n") { meal ->
         "- ${meal.time} ${meal.name} ${meal.calories}kcal 碳水${meal.carbs}g 蛋白${meal.protein}g 脂肪${meal.fat}g 标签:${meal.tags.joinToString("/")}"
     }.ifBlank { "暂无饮食记录" }
@@ -5215,10 +5839,27 @@ fun buildAiNutritionReportPrompt(
 
 日期：$selectedDate
 计划：${plan?.name ?: "未选择计划"}
-目标：热量${plan?.targetCalories ?: 0}kcal 蛋白${plan?.targetProtein ?: 0}g 脂肪${plan?.targetFat ?: 0}g 碳水${plan?.targetCarbs ?: 0}g 饮水${waterTargetMl}ml
+基础目标：热量${plan?.targetCalories ?: 0}kcal 蛋白${plan?.targetProtein ?: 0}g 脂肪${plan?.targetFat ?: 0}g 碳水${plan?.targetCarbs ?: 0}g 饮水${waterTargetMl}ml
+额外运动消耗：${exerciseCalories}kcal，描述：${exerciseBurnRecord?.description?.ifBlank { "未填写" } ?: "无"}
+运动补回公式：运动消耗热量补充 = 85% 碳水 + 15% 蛋白质。
+补回后目标：热量${adjustedTargetCalories}kcal 蛋白${adjustedTargetProtein}g 脂肪${plan?.targetFat ?: 0}g 碳水${adjustedTargetCarbs}g 饮水${waterTargetMl}ml
 已摄入：热量${consumedCalories}kcal 蛋白${consumedProtein}g 脂肪${consumedFat}g 碳水${consumedCarbs}g 饮水${drunkWaterMl}ml
 饮食记录：
 $mealLines
+""".trimIndent()
+}
+
+fun buildAiExerciseCaloriesPrompt(selectedDate: String, description: String): String {
+    return """
+你是一个谨慎的运动热量估算助手。请根据用户描述估算当天额外运动消耗热量。
+只返回 JSON 对象，不要返回 Markdown。
+字段：calories, note。
+calories 必须是整数 kcal，表示运动额外消耗，不要包含基础代谢。
+如果描述不完整，请给保守估计，并在 note 里说明不确定性。
+如果明显不是运动描述，calories 返回 0。
+
+日期：$selectedDate
+运动描述：${description.ifBlank { "未填写" }}
 """.trimIndent()
 }
 
@@ -5554,6 +6195,22 @@ fun extractJsonStringArrayAny(json: String, vararg keys: String): List<String> {
     return keys.firstNotNullOfOrNull { key -> extractJsonStringArray(json, key).takeIf { it.isNotEmpty() } }.orEmpty()
 }
 
+fun parseExerciseCaloriesFromText(text: String): Int? {
+    val cleanedText = cleanAiJsonText(text)
+    val json = extractCandidateJsonObjects(cleanedText).firstOrNull() ?: cleanedText
+    return extractJsonNumberAny(json, "calories", "kcal", "exerciseCalories", "burnedCalories", "消耗", "热量消耗")
+        ?.toInt()
+        ?.coerceIn(0, 3000)
+}
+
+fun exerciseCarbsGrams(exerciseCalories: Int): Int {
+    return kotlin.math.round(exerciseCalories.coerceAtLeast(0) * 0.85 / 4.0).toInt()
+}
+
+fun exerciseProteinGrams(exerciseCalories: Int): Int {
+    return kotlin.math.round(exerciseCalories.coerceAtLeast(0) * 0.15 / 4.0).toInt()
+}
+
 fun String.decodeJsonString(): String {
     return this
         .replace("\\n", "\n")
@@ -5603,6 +6260,14 @@ fun loadAuthorWordsText(context: Context): String {
             reader.readText()
         }
     }.getOrDefault("作者的话暂时无法加载，请确认 Authorswords.md 已打包进 app/src/main/assets。")
+}
+
+fun loadLanzouUpdateQrBitmap(context: Context): Bitmap? {
+    return runCatching {
+        context.assets.open("蓝奏云链接.png").use { inputStream ->
+            BitmapFactory.decodeStream(inputStream)
+        }
+    }.getOrNull()
 }
 
 fun currentAppVersionCode(context: Context): Int {
@@ -5910,6 +6575,12 @@ fun loadAppState(context: Context): AppState {
         .filter { it.isNotBlank() }
         .mapNotNull { line -> decodeWaterRecord(line) }
         .toList()
+    val exerciseBurnRecordsText = prefs.getString("exerciseBurnRecords", "").orEmpty()
+    val exerciseBurnRecords = exerciseBurnRecordsText
+        .lineSequence()
+        .filter { it.isNotBlank() }
+        .mapNotNull { line -> decodeExerciseBurnRecord(line) }
+        .toList()
     val aiSettings = decodeAiSettings(prefs.getString("aiSettings", "").orEmpty()) ?: AiSettings()
     val aiSettingsListText = prefs.getString("aiSettingsList", "").orEmpty()
     val aiSettingsList = aiSettingsListText
@@ -5929,6 +6600,7 @@ fun loadAppState(context: Context): AppState {
         plans = plans,
         dailyPlanSelections = dailyPlanSelections,
         waterRecords = waterRecords,
+        exerciseBurnRecords = exerciseBurnRecords,
         aiSettings = aiSettings,
         aiSettingsList = aiSettingsList
     )
@@ -5946,6 +6618,7 @@ fun saveAppState(
     plans: List<NutritionPlan> = emptyList(),
     dailyPlanSelections: List<DailyPlanSelection> = emptyList(),
     waterRecords: List<WaterRecord> = emptyList(),
+    exerciseBurnRecords: List<ExerciseBurnRecord> = emptyList(),
     aiSettings: AiSettings = AiSettings(),
     aiSettingsList: List<AiSettings> = emptyList()
 ) {
@@ -5955,6 +6628,7 @@ fun saveAppState(
     val plansText = plans.joinToString("\n") { encodeNutritionPlan(it) }
     val dailyPlanSelectionsText = dailyPlanSelections.joinToString("\n") { encodeDailyPlanSelection(it) }
     val waterRecordsText = waterRecords.joinToString("\n") { encodeWaterRecord(it) }
+    val exerciseBurnRecordsText = exerciseBurnRecords.joinToString("\n") { encodeExerciseBurnRecord(it) }
     val aiSettingsText = encodeAiSettings(aiSettings)
     val aiSettingsListText = aiSettingsList.joinToString("\n") { encodeAiSettings(it) }
     context.getSharedPreferences("calorie_free_state", Context.MODE_PRIVATE)
@@ -5969,6 +6643,7 @@ fun saveAppState(
         .putString("plans", plansText)
         .putString("dailyPlanSelections", dailyPlanSelectionsText)
         .putString("waterRecords", waterRecordsText)
+        .putString("exerciseBurnRecords", exerciseBurnRecordsText)
         .putString("aiSettings", aiSettingsText)
         .putString("aiSettingsList", aiSettingsListText)
         .apply()
@@ -6083,6 +6758,27 @@ fun decodeWaterRecord(line: String): WaterRecord? {
     }
 }
 
+fun encodeExerciseBurnRecord(record: ExerciseBurnRecord): String {
+    return listOf(
+        record.date.encodeStorageField(),
+        record.calories.toString(),
+        record.description.encodeStorageField()
+    ).joinToString("|")
+}
+
+fun decodeExerciseBurnRecord(line: String): ExerciseBurnRecord? {
+    val parts = line.split("|")
+    return if (parts.size >= 2) {
+        ExerciseBurnRecord(
+            date = parts[0].decodeStorageField(),
+            calories = parts[1].toIntOrNull() ?: return null,
+            description = parts.getOrNull(2)?.decodeStorageField().orEmpty()
+        )
+    } else {
+        null
+    }
+}
+
 fun encodeNutritionPlan(plan: NutritionPlan): String {
     return listOf(
         plan.id.toString(),
@@ -6092,6 +6788,7 @@ fun encodeNutritionPlan(plan: NutritionPlan): String {
         plan.targetFat.toString(),
         plan.targetCarbs.toString(),
         plan.waterTargetMl.toString(),
+        plan.dailyCalorieDeficit.toString(),
         plan.isDefault.toString(),
         plan.note.encodeStorageField()
     ).joinToString("|")
@@ -6099,7 +6796,7 @@ fun encodeNutritionPlan(plan: NutritionPlan): String {
 
 fun decodeNutritionPlan(line: String): NutritionPlan? {
     val parts = line.split("|")
-    return if (parts.size >= 9) {
+    return if (parts.size >= 10) {
         NutritionPlan(
             id = parts[0].toLongOrNull() ?: return null,
             name = parts[1].decodeStorageField(),
@@ -6108,6 +6805,20 @@ fun decodeNutritionPlan(line: String): NutritionPlan? {
             targetFat = parts[4].toIntOrNull() ?: return null,
             targetCarbs = parts[5].toIntOrNull() ?: return null,
             waterTargetMl = parts[6].toIntOrNull() ?: 2000,
+            dailyCalorieDeficit = parts[7].toIntOrNull() ?: 0,
+            isDefault = parts[8].toBooleanStrictOrNull() ?: false,
+            note = parts[9].decodeStorageField()
+        )
+    } else if (parts.size >= 9) {
+        NutritionPlan(
+            id = parts[0].toLongOrNull() ?: return null,
+            name = parts[1].decodeStorageField(),
+            targetCalories = parts[2].toIntOrNull() ?: return null,
+            targetProtein = parts[3].toIntOrNull() ?: return null,
+            targetFat = parts[4].toIntOrNull() ?: return null,
+            targetCarbs = parts[5].toIntOrNull() ?: return null,
+            waterTargetMl = parts[6].toIntOrNull() ?: 2000,
+            dailyCalorieDeficit = 0,
             isDefault = parts[7].toBooleanStrictOrNull() ?: false,
             note = parts[8].decodeStorageField()
         )
@@ -6302,6 +7013,62 @@ fun offsetMonthText(monthText: String, offsetMonths: Int): String {
         add(Calendar.MONTH, offsetMonths)
     }
     return formatter.format(calendar.time)
+}
+
+fun calendarCellsForMonth(monthText: String): List<String> {
+    val monthFormatter = SimpleDateFormat("yyyy-MM", Locale.getDefault())
+    val dateFormatter = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+    val firstDate = monthFormatter.parse(monthText) ?: Date()
+    val firstDayCalendar = Calendar.getInstance().apply {
+        time = firstDate
+        set(Calendar.DAY_OF_MONTH, 1)
+    }
+    val leadingDays = (firstDayCalendar.get(Calendar.DAY_OF_WEEK) + 5) % 7
+    val startCalendar = (firstDayCalendar.clone() as Calendar).apply {
+        add(Calendar.DAY_OF_MONTH, -leadingDays)
+    }
+    return (0 until 42).map { offset ->
+        val cellCalendar = (startCalendar.clone() as Calendar).apply {
+            add(Calendar.DAY_OF_MONTH, offset)
+        }
+        dateFormatter.format(cellCalendar.time)
+    }
+}
+
+fun datesInMonth(monthText: String): List<String> {
+    val monthFormatter = SimpleDateFormat("yyyy-MM", Locale.getDefault())
+    val dateFormatter = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+    val firstDate = monthFormatter.parse(monthText) ?: Date()
+    val calendar = Calendar.getInstance().apply {
+        time = firstDate
+        set(Calendar.DAY_OF_MONTH, 1)
+    }
+    val maxDay = calendar.getActualMaximum(Calendar.DAY_OF_MONTH)
+    return (1..maxDay).map { day ->
+        val dayCalendar = (calendar.clone() as Calendar).apply {
+            set(Calendar.DAY_OF_MONTH, day)
+        }
+        dateFormatter.format(dayCalendar.time)
+    }
+}
+
+fun planForDate(
+    date: String,
+    plans: List<NutritionPlan>,
+    dailyPlanSelections: List<DailyPlanSelection>
+): NutritionPlan? {
+    val selectedPlanId = dailyPlanSelections.firstOrNull { it.date == date }?.planId
+    return plans.firstOrNull { it.id == selectedPlanId }
+        ?: plans.firstOrNull { it.isDefault }
+        ?: plans.firstOrNull()
+}
+
+fun targetCaloriesForDate(
+    date: String,
+    plans: List<NutritionPlan>,
+    dailyPlanSelections: List<DailyPlanSelection>
+): Int? {
+    return planForDate(date, plans, dailyPlanSelections)?.targetCalories
 }
 
 fun currentTimeText(): String {
