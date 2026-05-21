@@ -41,12 +41,16 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -116,6 +120,8 @@ private const val AI_DEVELOPER_MODE = false
 private const val GITHUB_RELEASES_URL = "https://github.com/guaidaojide666/CalorieFree/releases/latest"
 private const val LANZOU_UPDATE_URL = "https://wwbuu.lanzoub.com/b01bjf4c4d"
 private const val LANZOU_UPDATE_PASSWORD = "gzcs"
+private const val VISION_PROBE_IMAGE_DATA_URL =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7ZfH0AAAAASUVORK5CYII="
 private val MEAL_OCCASION_TAGS = listOf("早餐", "午餐", "晚餐", "下午加餐", "夜宵", "零食", "加餐")
 
 enum class ServingType {
@@ -257,6 +263,11 @@ data class AiVerificationResult(
     val availabilityResponse: String,
     val supportsVision: Boolean,
     val visionImageUploadFormat: VisionImageUploadFormat = VisionImageUploadFormat.Auto
+)
+
+data class VisionSupportProbeResult(
+    val uploadFormat: VisionImageUploadFormat,
+    val response: String
 )
 
 data class AiPresetGroup(
@@ -1883,7 +1894,7 @@ fun AiSettingsDialog(
         coroutineScope.launch {
             val detectedFormat = runCatching {
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    withTransientAiRetry { requestVisionImageUploadFormat(currentSettings) }
+                    withTransientAiRetry { requestVisionSupportProbe(currentSettings).uploadFormat }
                 }
             }
                 .getOrElse { currentSettings.resolvedVisionImageUploadFormat() }
@@ -3579,7 +3590,7 @@ fun FoodLibraryScreen(
     }
 
     if (showAddFoodDialog) {
-        FoodEditorDialog(
+        FoodEditorResponsiveDialog(
             initialFood = FoodItem(name = "", protein = 0.0, fat = 0.0, carbs = 0.0, category = "自定义"),
             onDismiss = { showAddFoodDialog = false },
             onSave = { newFood ->
@@ -3590,7 +3601,7 @@ fun FoodLibraryScreen(
     }
 
     editorState?.let { state ->
-        FoodEditorDialog(
+        FoodEditorResponsiveDialog(
             initialFood = state.originalFood,
             onDismiss = { editorState = null },
             onSave = { updatedFood ->
@@ -6728,6 +6739,179 @@ fun FoodEditorDialog(
 }
 
 @Composable
+fun FoodEditorResponsiveDialog(
+    initialFood: FoodItem,
+    onDismiss: () -> Unit,
+    onSave: (FoodItem) -> Unit
+) {
+    val configuration = LocalConfiguration.current
+    var name by remember { mutableStateOf(initialFood.name) }
+    var carbs by remember { mutableStateOf(formatNumber(initialFood.carbs)) }
+    var protein by remember { mutableStateOf(formatNumber(initialFood.protein)) }
+    var fat by remember { mutableStateOf(formatNumber(initialFood.fat)) }
+    var servingType by remember { mutableStateOf(initialFood.servingType) }
+    var unitLabel by remember { mutableStateOf(initialFood.unitLabel.takeIf { it.isNotBlank() } ?: "个") }
+    var category by remember { mutableStateOf(if (initialFood.category in defaultFoodCategories()) initialFood.category else "自定义") }
+    var customCategory by remember { mutableStateOf(if (initialFood.category in defaultFoodCategories()) "" else initialFood.category) }
+    var pendingType by remember { mutableStateOf<ServingType?>(null) }
+    var errorText by remember { mutableStateOf<String?>(null) }
+
+    pendingType?.let { targetType ->
+        ConfirmDialog(
+            title = "切换每份类型",
+            message = "切换“每个/每100g”会清空当前营养素数据，是否继续？",
+            confirmText = "继续",
+            onConfirm = {
+                servingType = targetType
+                carbs = ""
+                protein = ""
+                fat = ""
+                pendingType = null
+            },
+            onDismiss = { pendingType = null }
+        )
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth(0.94f)
+                .widthIn(max = 560.dp)
+                .heightIn(max = configuration.screenHeightDp.dp * 0.9f)
+                .imePadding(),
+            shape = RoundedCornerShape(28.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFFFDFBFF))
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 22.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Text(text = "编辑食物", fontWeight = FontWeight.Bold, fontSize = 19.sp, color = Color(0xFF161A23))
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f, fill = false)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    AppTextField(label = "食物名称", value = name, onValueChange = { name = it })
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                if (servingType != ServingType.PerItem) pendingType = ServingType.PerItem
+                            },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(16.dp)
+                        ) {
+                            Text(text = if (servingType == ServingType.PerItem) "✓ 每个" else "每个")
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                if (servingType != ServingType.Per100g) pendingType = ServingType.Per100g
+                            },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(16.dp)
+                        ) {
+                            Text(text = if (servingType == ServingType.Per100g) "✓ 每100g" else "每100g")
+                        }
+                    }
+                    CategorySelectorRow(
+                        categories = defaultFoodCategories(),
+                        selectedCategory = category,
+                        onSelectCategory = { category = it }
+                    )
+                    if (servingType == ServingType.PerItem) {
+                        AppTextField(
+                            label = "量词（可选，不填默认是个）",
+                            value = if (unitLabel == "个") "" else unitLabel,
+                            onValueChange = { unitLabel = it.trim().ifBlank { "个" } }
+                        )
+                    }
+                    if (category == "自定义") {
+                        AppTextField(
+                            label = "自定义分类名称",
+                            value = customCategory,
+                            onValueChange = { customCategory = it }
+                        )
+                    }
+                    AppTextField(label = "${servingTypeLabel(servingType, unitLabel)}碳水 g", value = carbs, onValueChange = { carbs = it }, isNumber = true)
+                    AppTextField(label = "${servingTypeLabel(servingType, unitLabel)}蛋白质 g", value = protein, onValueChange = { protein = it }, isNumber = true)
+                    AppTextField(label = "${servingTypeLabel(servingType, unitLabel)}脂肪 g", value = fat, onValueChange = { fat = it }, isNumber = true)
+                    errorText?.let {
+                        Text(text = it, color = Color(0xFFEF5350), fontSize = 13.sp)
+                    }
+                    Spacer(modifier = Modifier.height(2.dp))
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Text(text = "取消")
+                    }
+                    Button(
+                        onClick = {
+                            val parsedCarbs = parseOneDecimal(carbs)
+                            val parsedProtein = parseOneDecimal(protein)
+                            val parsedFat = parseOneDecimal(fat)
+
+                            if (name.isBlank()) {
+                                errorText = "请输入食物名称"
+                                return@Button
+                            }
+                            if (parsedCarbs == null || parsedProtein == null || parsedFat == null) {
+                                errorText = "请输入有效营养素"
+                                return@Button
+                            }
+                            if (parsedCarbs < 0 || parsedProtein < 0 || parsedFat < 0) {
+                                errorText = "营养素不能为负数"
+                                return@Button
+                            }
+                            val finalCategory = if (category == "自定义") {
+                                customCategory.trim().ifBlank { "自定义" }
+                            } else {
+                                category
+                            }
+
+                            onSave(
+                                FoodItem(
+                                    name = name.trim(),
+                                    carbs = parsedCarbs,
+                                    protein = parsedProtein,
+                                    fat = parsedFat,
+                                    servingType = servingType,
+                                    category = finalCategory,
+                                    unitLabel = normalizedUnitLabel(servingType, unitLabel),
+                                    isHidden = initialFood.isHidden
+                                )
+                            )
+                        },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Text(text = "保存")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun EmptyMealCard() {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -7271,21 +7455,21 @@ suspend fun verifyAiSettings(settings: AiSettings): AiVerificationResult {
                 settings = settings,
                 prompt = "请只回复 OK，用于检测模型是否可用。"
             )
-            val visionResponse = requestAiCapabilityCheck(
+            /* val visionResponse = requestAiCapabilityCheck(
                 settings = settings,
                 prompt = "请只回答 YES 或 NO：你当前这个模型是否支持图片识别，是否能在聊天消息中接收图片并理解图片内容？不要解释。"
-            )
-            val supportsVision = parseVisionSupportAnswer(visionResponse)
+            ) */
+            val visionProbeResult = runCatching { requestVisionSupportProbe(settings) }.getOrNull()
             AiVerificationResult(
                 availabilityResponse = availabilityResponse,
-                supportsVision = supportsVision,
-                visionImageUploadFormat = if (supportsVision) requestVisionImageUploadFormat(settings) else VisionImageUploadFormat.Auto
+                supportsVision = visionProbeResult != null,
+                visionImageUploadFormat = visionProbeResult?.uploadFormat ?: VisionImageUploadFormat.Auto
             )
         }
     }
 }
 
-fun requestAiCapabilityCheck(settings: AiSettings, prompt: String): String {
+fun requestAiCapabilityCheck(settings: AiSettings, prompt: String, imageDataUrl: String? = null): String {
     val requestUrl = normalizeAiBaseUrl(
         settings.baseUrl,
         providerLooksAnthropicLike(settings),
@@ -7294,11 +7478,11 @@ fun requestAiCapabilityCheck(settings: AiSettings, prompt: String): String {
     ) ?: throw IllegalStateException("AI 接口地址格式不正确，请到 AI 设置中重新填写 http/https 地址。")
     val capabilityCheckSystemPrompt = "你是一个模型能力检测助手。严格按用户要求作答，不要输出多余内容。"
     val payload = if (providerNeedsAnthropicVersion(settings)) {
-        buildAnthropicPayload(settings, prompt, systemPrompt = capabilityCheckSystemPrompt)
+        buildAnthropicPayload(settings, prompt, imageDataUrl = imageDataUrl, systemPrompt = capabilityCheckSystemPrompt)
     } else if (providerLooksZhipuLike(settings)) {
-        buildZhipuPayload(settings, prompt)
+        buildZhipuPayload(settings, prompt, imageDataUrl = imageDataUrl)
     } else {
-        buildOpenAiCompatiblePayload(settings, prompt, systemPrompt = capabilityCheckSystemPrompt)
+        buildOpenAiCompatiblePayload(settings, prompt, imageDataUrl = imageDataUrl, systemPrompt = capabilityCheckSystemPrompt)
     }
     val connection = (URL(requestUrl).openConnection() as HttpURLConnection).apply {
         requestMethod = "POST"
@@ -7368,6 +7552,99 @@ fun parseVisionImageUploadFormatAnswer(answer: String, settings: AiSettings): Vi
         Regex("\\b(UNSUPPORTED|UNKNOWN|AUTO)\\b").containsMatchIn(uppercase) -> settings.resolvedVisionImageUploadFormat()
         else -> settings.resolvedVisionImageUploadFormat()
     }
+}
+
+fun candidateVisionUploadFormats(settings: AiSettings): List<VisionImageUploadFormat> {
+    return when {
+        providerNeedsAnthropicVersion(settings) -> listOf(VisionImageUploadFormat.AnthropicBase64)
+        providerLooksZhipuLike(settings) -> listOf(
+            VisionImageUploadFormat.ImageUrlBase64,
+            VisionImageUploadFormat.ImageUrlDataUrl
+        )
+        else -> listOf(
+            VisionImageUploadFormat.ImageUrlDataUrl,
+            VisionImageUploadFormat.ImageUrlBase64
+        )
+    }.distinct()
+}
+
+fun isVisionProbeNegativeAnswer(answer: String): Boolean {
+    val lowercase = answer.lowercase(Locale.getDefault())
+    return listOf(
+        "no_image",
+        "no image",
+        "cannot see image",
+        "can't see image",
+        "unable to view image",
+        "cannot view image",
+        "unsupported",
+        "text-only",
+        "text only",
+        "无法读取图片",
+        "看不到图片",
+        "没有看到图片",
+        "不能看图",
+        "不支持图片"
+    ).any { lowercase.contains(it) }
+}
+
+fun isExplicitVisionUnsupportedError(error: Throwable): Boolean {
+    val message = error.message.orEmpty().lowercase(Locale.getDefault())
+    return listOf(
+        "image_url",
+        "vision",
+        "multimodal",
+        "unsupported image",
+        "does not support image",
+        "doesn't support image",
+        "not support image",
+        "图片",
+        "图像",
+        "多模态"
+    ).any { message.contains(it) }
+}
+
+fun requestVisionSupportProbe(settings: AiSettings): VisionSupportProbeResult {
+    val probePrompt = "你将收到一张测试图片。如果你确实收到了图片，请只回复 IMAGE_OK。若你没有看到图片或无法处理图片，请只回复 NO_IMAGE。不要解释。"
+    val errors = mutableListOf<Throwable>()
+    var sawNegativeAnswer = false
+
+    candidateVisionUploadFormats(settings).forEach { uploadFormat ->
+        val probeSettings = settings.copy(visionImageUploadFormat = uploadFormat)
+        val result = runCatching {
+            requestAiCapabilityCheck(
+                settings = probeSettings,
+                prompt = probePrompt,
+                imageDataUrl = VISION_PROBE_IMAGE_DATA_URL
+            )
+        }
+        result.onSuccess { answer ->
+            val normalized = answer.trim()
+            if (normalized.isBlank()) {
+                return@onSuccess
+            }
+            if (isVisionProbeNegativeAnswer(normalized)) {
+                sawNegativeAnswer = true
+                return@onSuccess
+            }
+            return VisionSupportProbeResult(uploadFormat = uploadFormat, response = normalized)
+        }.onFailure { error ->
+            errors += error
+        }
+    }
+
+    if (modelNameLooksVisionCapable(settings.modelName) && errors.none(::isExplicitVisionUnsupportedError) && !sawNegativeAnswer) {
+        return VisionSupportProbeResult(
+            uploadFormat = settings.resolvedVisionImageUploadFormat(),
+            response = "MODEL_NAME_FALLBACK"
+        )
+    }
+
+    if (errors.any(::isExplicitVisionUnsupportedError) || sawNegativeAnswer) {
+        throw IllegalStateException("模型未通过真实图片测试，当前接口看起来不支持图片识别。")
+    }
+
+    throw errors.firstOrNull() ?: IllegalStateException("真实图片测试失败，暂时无法确认该模型的图片能力。")
 }
 
 suspend fun fetchAiModelList(settings: AiSettings): List<String> {
