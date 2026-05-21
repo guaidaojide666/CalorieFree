@@ -1,11 +1,14 @@
 package com.caloriefree.app
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.util.Base64
 import androidx.activity.ComponentActivity
@@ -13,19 +16,34 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.FileProvider
+import androidx.core.content.ContextCompat
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -44,6 +62,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -52,23 +71,35 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import java.io.IOException
 import java.io.OutputStreamWriter
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.text.SimpleDateFormat
@@ -76,6 +107,8 @@ import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 
@@ -83,6 +116,7 @@ private const val AI_DEVELOPER_MODE = false
 private const val GITHUB_RELEASES_URL = "https://github.com/guaidaojide666/CalorieFree/releases/latest"
 private const val LANZOU_UPDATE_URL = "https://wwbuu.lanzoub.com/b01bjf4c4d"
 private const val LANZOU_UPDATE_PASSWORD = "gzcs"
+private val MEAL_OCCASION_TAGS = listOf("早餐", "午餐", "晚餐", "下午加餐", "夜宵", "零食", "加餐")
 
 enum class ServingType {
     PerItem,
@@ -99,28 +133,36 @@ enum class RecognitionImageType {
     NutritionLabel
 }
 
+enum class BiologicalSex {
+    Male,
+    Female
+}
+
 data class MealRecord(
     val name: String,
-    val calories: Int,
-    val protein: Int,
-    val fat: Int,
-    val carbs: Int,
+    val calories: Double,
+    val protein: Double,
+    val fat: Double,
+    val carbs: Double,
     val time: String,
     val date: String = currentDateText(),
     val tags: List<String> = listOf("早餐"),
     val servingType: ServingType = ServingType.Per100g,
     val quantity: Double = 100.0,
-    val servingCount: Double = 1.0
+    val servingCount: Double = 1.0,
+    val unitLabel: String = "个"
 )
 
 data class FoodItem(
     val name: String,
-    val protein: Int,
-    val fat: Int,
-    val carbs: Int,
+    val protein: Double,
+    val fat: Double,
+    val carbs: Double,
     val servingType: ServingType = ServingType.Per100g,
     val category: String = "自定义",
-    val calories: Int = calculateCalories(protein, fat, carbs)
+    val unitLabel: String = "个",
+    val isHidden: Boolean = false,
+    val calories: Double = calculateCalories(protein, fat, carbs)
 )
 
 data class FoodEditorState(
@@ -135,13 +177,14 @@ data class MealEditorState(
 data class NutritionPlan(
     val id: Long,
     val name: String,
-    val targetCalories: Int,
-    val targetProtein: Int,
-    val targetFat: Int,
-    val targetCarbs: Int,
-    val waterTargetMl: Int = 2000,
-    val dailyCalorieDeficit: Int = 0,
+    val targetCalories: Double,
+    val targetProtein: Double,
+    val targetFat: Double,
+    val targetCarbs: Double,
+    val waterTargetMl: Double = 2000.0,
+    val dailyCalorieDeficit: Double = 0.0,
     val isDefault: Boolean = false,
+    val isHidden: Boolean = false,
     val note: String = ""
 )
 
@@ -153,14 +196,21 @@ data class DailyPlanSelection(
 data class WaterRecord(
     val id: Long,
     val date: String,
-    val amountMl: Int
+    val amountMl: Double
 )
 
 data class ExerciseBurnRecord(
     val date: String,
-    val calories: Int,
+    val calories: Double,
     val description: String = ""
 )
+
+enum class VisionImageUploadFormat {
+    Auto,
+    ImageUrlDataUrl,
+    ImageUrlBase64,
+    AnthropicBase64
+}
 
 data class AiSettings(
     val id: Long = 1L,
@@ -173,7 +223,40 @@ data class AiSettings(
     val selectedForVisionWork: Boolean = false,
     val selectedForTextWork: Boolean = false,
     val supportsVision: Boolean = true,
+    val manualVisionConfirmed: Boolean = false,
+    val visionImageUploadFormat: VisionImageUploadFormat = VisionImageUploadFormat.Auto,
     val verifiedSignature: String = ""
+)
+
+fun AiSettings.canHandleVisionTasks(): Boolean = supportsVision || manualVisionConfirmed
+
+fun AiSettings.resolvedVisionImageUploadFormat(): VisionImageUploadFormat {
+    if (visionImageUploadFormat != VisionImageUploadFormat.Auto) return visionImageUploadFormat
+    return when {
+        providerNeedsAnthropicVersion(this) -> VisionImageUploadFormat.AnthropicBase64
+        providerLooksZhipuLike(this) -> VisionImageUploadFormat.ImageUrlBase64
+        else -> VisionImageUploadFormat.ImageUrlDataUrl
+    }
+}
+
+fun VisionImageUploadFormat.displayName(): String {
+    return when (this) {
+        VisionImageUploadFormat.Auto -> "自动判断"
+        VisionImageUploadFormat.ImageUrlDataUrl -> "image_url + 完整 data URL"
+        VisionImageUploadFormat.ImageUrlBase64 -> "image_url + 原始 Base64"
+        VisionImageUploadFormat.AnthropicBase64 -> "Anthropic base64 source"
+    }
+}
+
+fun parseVisionImageUploadFormatStoredValue(value: String?): VisionImageUploadFormat {
+    return enumValues<VisionImageUploadFormat>().firstOrNull { it.name.equals(value.orEmpty(), ignoreCase = true) }
+        ?: VisionImageUploadFormat.Auto
+}
+
+data class AiVerificationResult(
+    val availabilityResponse: String,
+    val supportsVision: Boolean,
+    val visionImageUploadFormat: VisionImageUploadFormat = VisionImageUploadFormat.Auto
 )
 
 data class AiPresetGroup(
@@ -193,11 +276,41 @@ data class UpdateInfo(
     val changelog: String
 )
 
+data class UserProfile(
+    val heightCm: Double = 0.0,
+    val weightKg: Double = 0.0,
+    val ageYears: Int = 0,
+    val biologicalSex: BiologicalSex = BiologicalSex.Female
+)
+
+data class FavoriteFoodProfile(
+    val name: String,
+    val category: String,
+    val servingType: ServingType,
+    val unitLabel: String,
+    val carbsPerServing: Double,
+    val proteinPerServing: Double,
+    val fatPerServing: Double,
+    val usageCount: Int,
+    val totalQuantity: Double
+)
+
+data class RemainingFoodEquivalent(
+    val staple: FavoriteFoodProfile,
+    val proteinSource: FavoriteFoodProfile,
+    val stapleServingCount: Double,
+    val proteinServingCount: Double,
+    val totalCarbs: Double,
+    val totalProtein: Double
+)
+
 data class AppState(
-    val targetCalories: Int,
-    val targetProtein: Int,
-    val targetFat: Int,
-    val targetCarbs: Int,
+    val targetCalories: Double,
+    val targetProtein: Double,
+    val targetFat: Double,
+    val targetCarbs: Double,
+    val hasAnyStoredData: Boolean = false,
+    val userProfile: UserProfile = UserProfile(),
     val meals: List<MealRecord>,
     val foods: List<FoodItem>,
     val tags: List<String>,
@@ -221,11 +334,58 @@ enum class Screen {
 }
 
 class MainActivity : ComponentActivity() {
+    private val requestPhotoPermissionsLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            CalorieFreeApp()
+            val currentDensity = LocalDensity.current
+            CompositionLocalProvider(
+                LocalDensity provides Density(
+                    density = currentDensity.density,
+                    fontScale = 1f
+                )
+            ) {
+                CalorieFreeApp()
+            }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        ensurePhotoAccessPermission()
+    }
+
+    private fun ensurePhotoAccessPermission() {
+        if (hasPhotoAccessPermission()) return
+        requestPhotoPermissionsLauncher.launch(photoPermissionsToRequest())
+    }
+
+    private fun hasPhotoAccessPermission(): Boolean {
+        return when {
+            Build.VERSION.SDK_INT >= 34 -> {
+                isPermissionGranted(Manifest.permission.READ_MEDIA_IMAGES) ||
+                    isPermissionGranted(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
+            }
+            Build.VERSION.SDK_INT >= 33 -> isPermissionGranted(Manifest.permission.READ_MEDIA_IMAGES)
+            else -> isPermissionGranted(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+    }
+
+    private fun photoPermissionsToRequest(): Array<String> {
+        return when {
+            Build.VERSION.SDK_INT >= 34 -> arrayOf(
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
+            )
+            Build.VERSION.SDK_INT >= 33 -> arrayOf(Manifest.permission.READ_MEDIA_IMAGES)
+            else -> arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+    }
+
+    private fun isPermissionGranted(permission: String): Boolean {
+        return ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
     }
 }
 
@@ -233,10 +393,11 @@ class MainActivity : ComponentActivity() {
 fun CalorieFreeApp() {
     val context = LocalContext.current
     var currentScreen by remember { mutableStateOf(Screen.Home) }
-    var targetCalories by remember { mutableStateOf(2000) }
-    var targetProtein by remember { mutableStateOf(120) }
-    var targetFat by remember { mutableStateOf(65) }
-    var targetCarbs by remember { mutableStateOf(250) }
+    var targetCalories by remember { mutableStateOf(2000.0) }
+    var targetProtein by remember { mutableStateOf(120.0) }
+    var targetFat by remember { mutableStateOf(65.0) }
+    var targetCarbs by remember { mutableStateOf(250.0) }
+    var userProfile by remember { mutableStateOf(UserProfile()) }
     var hasLoadedStorage by remember { mutableStateOf(false) }
     var selectedDate by remember { mutableStateOf(currentDateText()) }
     var mealEditorState by remember { mutableStateOf<MealEditorState?>(null) }
@@ -248,7 +409,7 @@ fun CalorieFreeApp() {
     val currentVersionCode = remember { currentAppVersionCode(context) }
     val meals = remember { mutableStateListOf<MealRecord>() }
     val foods = remember { mutableStateListOf<FoodItem>() }
-    val tags = remember { mutableStateListOf("早餐", "午餐", "晚餐", "零食") }
+    val tags = remember { mutableStateListOf("早餐", "午餐", "晚餐", "下午加餐", "夜宵", "零食", "加餐") }
     val plans = remember { mutableStateListOf<NutritionPlan>() }
     val dailyPlanSelections = remember { mutableStateListOf<DailyPlanSelection>() }
     val waterRecords = remember { mutableStateListOf<WaterRecord>() }
@@ -275,28 +436,27 @@ fun CalorieFreeApp() {
         targetProtein = appState.targetProtein
         targetFat = appState.targetFat
         targetCarbs = appState.targetCarbs
+        userProfile = appState.userProfile
         meals.clear()
         meals.addAll(appState.meals)
         foods.clear()
-        foods.addAll(appState.foods)
-        tags.clear()
-        tags.addAll(appState.tags.ifEmpty { listOf("早餐", "午餐", "晚餐", "零食") })
-        plans.clear()
-        plans.addAll(
-            appState.plans.ifEmpty {
-                listOf(
-                    NutritionPlan(
-                        id = 1L,
-                        name = "默认计划",
-                        targetCalories = appState.targetCalories,
-                        targetProtein = appState.targetProtein,
-                        targetFat = appState.targetFat,
-                        targetCarbs = appState.targetCarbs,
-                        isDefault = true
-                    )
-                )
+        foods.addAll(
+            if (appState.foods.isEmpty() && !appState.hasAnyStoredData) {
+                defaultPresetFoods()
+            } else {
+                appState.foods
             }
         )
+        tags.clear()
+        tags.addAll(
+            if (appState.tags.isEmpty()) {
+                MEAL_OCCASION_TAGS
+            } else {
+                (MEAL_OCCASION_TAGS + appState.tags).distinct()
+            }
+        )
+        plans.clear()
+        plans.addAll(appState.plans)
         dailyPlanSelections.clear()
         dailyPlanSelections.addAll(appState.dailyPlanSelections)
         waterRecords.clear()
@@ -304,16 +464,12 @@ fun CalorieFreeApp() {
         exerciseBurnRecords.clear()
         exerciseBurnRecords.addAll(appState.exerciseBurnRecords)
         aiSettingsList.clear()
-        aiSettingsList.addAll(
-            appState.aiSettingsList.ifEmpty {
-                listOf(appState.aiSettings.copy(id = 1L, selectedForVisionWork = appState.aiSettings.enabled && appState.aiSettings.supportsVision, selectedForTextWork = appState.aiSettings.enabled))
-            }
-        )
-        aiSettings = aiSettingsList.firstOrNull { it.selectedForTextWork || it.selectedForVisionWork } ?: aiSettingsList.firstOrNull() ?: appState.aiSettings
+        aiSettingsList.addAll(appState.aiSettingsList)
+        aiSettings = aiSettingsList.firstOrNull { it.selectedForTextWork || it.selectedForVisionWork } ?: aiSettingsList.firstOrNull() ?: AiSettings()
         hasLoadedStorage = true
     }
 
-    LaunchedEffect(hasLoadedStorage, targetCalories, targetProtein, targetFat, targetCarbs, meals.toList(), foods.toList(), tags.toList(), plans.toList(), dailyPlanSelections.toList(), waterRecords.toList(), exerciseBurnRecords.toList(), aiSettingsList.toList()) {
+    LaunchedEffect(hasLoadedStorage, targetCalories, targetProtein, targetFat, targetCarbs, userProfile, meals.toList(), foods.toList(), tags.toList(), plans.toList(), dailyPlanSelections.toList(), waterRecords.toList(), exerciseBurnRecords.toList(), aiSettingsList.toList()) {
         if (hasLoadedStorage) {
             saveAppState(
                 context = context,
@@ -321,6 +477,7 @@ fun CalorieFreeApp() {
                 targetProtein = targetProtein,
                 targetFat = targetFat,
                 targetCarbs = targetCarbs,
+                userProfile = userProfile,
                 meals = meals,
                 foods = foods,
                 tags = tags,
@@ -328,7 +485,7 @@ fun CalorieFreeApp() {
                 dailyPlanSelections = dailyPlanSelections,
                 waterRecords = waterRecords,
                 exerciseBurnRecords = exerciseBurnRecords,
-                aiSettings = aiSettingsList.firstOrNull() ?: aiSettings,
+                aiSettings = aiSettingsList.firstOrNull() ?: AiSettings(),
                 aiSettingsList = aiSettingsList
             )
         }
@@ -341,11 +498,11 @@ fun CalorieFreeApp() {
     val activeTargetProtein = currentPlan?.targetProtein ?: targetProtein
     val activeTargetFat = currentPlan?.targetFat ?: targetFat
     val activeTargetCarbs = currentPlan?.targetCarbs ?: targetCarbs
-    val activeWaterTargetMl = currentPlan?.waterTargetMl ?: 2000
+    val activeWaterTargetMl = currentPlan?.waterTargetMl ?: 2000.0
     val selectedDateWaterRecords = waterRecords.filter { it.date == selectedDate }
     val drunkWaterMl = selectedDateWaterRecords.sumOf { it.amountMl }
     val selectedExerciseBurn = exerciseBurnRecords.firstOrNull { it.date == selectedDate }
-    val exerciseCalories = selectedExerciseBurn?.calories ?: 0
+    val exerciseCalories = selectedExerciseBurn?.calories ?: 0.0
     val exerciseExtraCarbs = exerciseCarbsGrams(exerciseCalories)
     val exerciseExtraProtein = exerciseProteinGrams(exerciseCalories)
     val adjustedTargetCalories = activeTargetCalories + exerciseCalories
@@ -362,11 +519,10 @@ fun CalorieFreeApp() {
         visible = showAiSettingsDialog,
         settingsList = aiSettingsList,
         onDismiss = { showAiSettingsDialog = false },
-        onSave = { updatedSettingsList ->
+        onUpdate = { updatedSettingsList ->
             aiSettingsList.clear()
             aiSettingsList.addAll(updatedSettingsList)
             aiSettings = updatedSettingsList.firstOrNull { it.selectedForTextWork || it.selectedForVisionWork } ?: updatedSettingsList.firstOrNull() ?: AiSettings()
-            showAiSettingsDialog = false
         }
     )
 
@@ -410,250 +566,271 @@ fun CalorieFreeApp() {
 
     MaterialTheme {
         Surface(modifier = Modifier.fillMaxSize()) {
-            when (currentScreen) {
-                Screen.Home -> HomeScreen(
-                    planName = currentPlan?.name.orEmpty(),
-                    targetCalories = adjustedTargetCalories,
-                    targetProtein = adjustedTargetProtein,
-                    targetFat = activeTargetFat,
-                    targetCarbs = adjustedTargetCarbs,
-                    baseTargetCalories = activeTargetCalories,
-                    baseTargetProtein = activeTargetProtein,
-                    baseTargetCarbs = activeTargetCarbs,
-                    exerciseBurnRecord = selectedExerciseBurn,
-                    textWorkAiSettings = textWorkAiSettings,
-                    waterTargetMl = activeWaterTargetMl,
-                    drunkWaterMl = drunkWaterMl,
-                    waterRecords = selectedDateWaterRecords,
-                    meals = meals.filter { it.date == selectedDate },
-                    recentFoods = foods.take(3),
-                    selectedDate = selectedDate,
-                    onPreviousDayClick = { selectedDate = offsetDateText(selectedDate, -1) },
-                    onNextDayClick = { selectedDate = offsetDateText(selectedDate, 1) },
-                    onTodayClick = { selectedDate = currentDateText() },
-                    onHistoryClick = { currentScreen = Screen.History },
-                    onAddMealClick = {
-                        mealEditorState = null
-                        currentScreen = Screen.AddMeal
-                    },
-                    onPlanClick = { currentScreen = Screen.Plan },
-                    onFoodLibraryClick = { currentScreen = Screen.FoodLibrary },
-                    onReportClick = { currentScreen = Screen.Report },
-                    onSponsorClick = { currentScreen = Screen.Sponsor },
-                    onAuthorWordsClick = { currentScreen = Screen.AuthorWords },
-                    onAiSettingsClick = { showAiSettingsDialog = true },
-                    onQuickAddFood = { food, quantity, recordTags ->
-                        val servingCount = servingCountFromQuantity(quantity, food.servingType)
-                        val totalProtein = (food.protein * servingCount).toInt()
-                        val totalFat = (food.fat * servingCount).toInt()
-                        val totalCarbs = (food.carbs * servingCount).toInt()
-                        meals.add(
-                            0,
-                            MealRecord(
-                                name = food.name,
-                                calories = calculateCalories(totalProtein, totalFat, totalCarbs),
-                                protein = totalProtein,
-                                fat = totalFat,
-                                carbs = totalCarbs,
-                                time = currentTimeText(),
-                                date = selectedDate,
-                                tags = recordTags,
-                                servingType = food.servingType,
-                                quantity = quantity,
-                                servingCount = servingCount
-                            )
-                        )
-                        recordTags.forEach { tag -> if (tags.none { it == tag }) tags.add(tag) }
-                    },
-                    onAddWater = { amountMl ->
-                        waterRecords.add(
-                            0,
-                            WaterRecord(
-                                id = (waterRecords.maxOfOrNull { it.id } ?: 0L) + 1L,
-                                date = selectedDate,
-                                amountMl = amountMl
-                            )
-                        )
-                    },
-                    onDeleteWater = { record -> waterRecords.remove(record) },
-                    onSaveExerciseBurn = { record ->
-                        exerciseBurnRecords.removeAll { it.date == selectedDate }
-                        if (record.calories > 0) {
-                            exerciseBurnRecords.add(record.copy(date = selectedDate))
-                        }
-                    },
-                    onClearExerciseBurn = {
-                        exerciseBurnRecords.removeAll { it.date == selectedDate }
-                    },
-                    onEditMeal = { meal ->
-                        mealEditorState = MealEditorState(meal)
-                        currentScreen = Screen.AddMeal
-                    },
-                    onDeleteMeal = { meal -> meals.remove(meal) },
-                    onClearMeals = { meals.removeAll { it.date == selectedDate } }
-                )
-
-                Screen.AddMeal -> AddMealScreen(
-                    tags = tags,
-                    aiSettingsList = aiSettingsList,
-                    initialMeal = mealEditorState?.originalMeal,
-                    onBack = {
-                        mealEditorState = null
-                        currentScreen = Screen.Home
-                    },
-                    onAddPresetTag = { tag -> if (tags.none { it == tag }) tags.add(tag) },
-                    onSave = { meal, saveToLibrary, libraryCategory ->
-                        if (saveToLibrary && foods.none { it.name.equals(meal.name, ignoreCase = true) }) {
-                            foods.add(
-                                FoodItem(
-                                    name = meal.name,
-                                    protein = (meal.protein / meal.servingCount).toInt(),
-                                    fat = (meal.fat / meal.servingCount).toInt(),
-                                    carbs = (meal.carbs / meal.servingCount).toInt(),
-                                    servingType = meal.servingType,
-                                    category = libraryCategory
+            AnimatedContent(
+                targetState = currentScreen,
+                transitionSpec = {
+                    if (targetState == Screen.Home) {
+                        (slideInHorizontally(initialOffsetX = { -it / 4 }) + fadeIn())
+                            .togetherWith(slideOutHorizontally(targetOffsetX = { it / 5 }) + fadeOut())
+                    } else {
+                        (slideInHorizontally(initialOffsetX = { it / 4 }) + fadeIn())
+                            .togetherWith(slideOutHorizontally(targetOffsetX = { -it / 5 }) + fadeOut())
+                    }
+                },
+                label = "main_screen_transition"
+            ) { screen ->
+                when (screen) {
+                    Screen.Home -> HomeScreen(
+                        planName = currentPlan?.name.orEmpty(),
+                        targetCalories = adjustedTargetCalories,
+                        targetProtein = adjustedTargetProtein,
+                        targetFat = activeTargetFat,
+                        targetCarbs = adjustedTargetCarbs,
+                        userProfile = userProfile,
+                        baseTargetCalories = activeTargetCalories,
+                        baseTargetProtein = activeTargetProtein,
+                        baseTargetCarbs = activeTargetCarbs,
+                        exerciseBurnRecord = selectedExerciseBurn,
+                        textWorkAiSettings = textWorkAiSettings,
+                        waterTargetMl = activeWaterTargetMl,
+                        drunkWaterMl = drunkWaterMl,
+                        waterRecords = selectedDateWaterRecords,
+                        meals = meals.filter { it.date == selectedDate },
+                        allMeals = meals.toList(),
+                        recentFoods = foods.filterNot { it.isHidden }.take(3),
+                        selectedDate = selectedDate,
+                        onPreviousDayClick = { selectedDate = offsetDateText(selectedDate, -1) },
+                        onNextDayClick = { selectedDate = offsetDateText(selectedDate, 1) },
+                        onTodayClick = { selectedDate = currentDateText() },
+                        onHistoryClick = { currentScreen = Screen.History },
+                        onAddMealClick = {
+                            mealEditorState = null
+                            currentScreen = Screen.AddMeal
+                        },
+                        onPlanClick = { currentScreen = Screen.Plan },
+                        onFoodLibraryClick = { currentScreen = Screen.FoodLibrary },
+                        onReportClick = { currentScreen = Screen.Report },
+                        onSponsorClick = { currentScreen = Screen.Sponsor },
+                        onAuthorWordsClick = { currentScreen = Screen.AuthorWords },
+                        onAiSettingsClick = { showAiSettingsDialog = true },
+                        onQuickAddFood = { food, quantity, recordTags ->
+                            val servingCount = servingCountFromQuantity(quantity, food.servingType)
+                            val totalProtein = roundOneDecimal(food.protein * servingCount)
+                            val totalFat = roundOneDecimal(food.fat * servingCount)
+                            val totalCarbs = roundOneDecimal(food.carbs * servingCount)
+                            meals.add(
+                                0,
+                                MealRecord(
+                                    name = food.name,
+                                    calories = calculateCalories(totalProtein, totalFat, totalCarbs),
+                                    protein = totalProtein,
+                                    fat = totalFat,
+                                    carbs = totalCarbs,
+                                    time = currentTimeText(),
+                                    date = selectedDate,
+                                    tags = recordTags,
+                                    servingType = food.servingType,
+                                    quantity = quantity,
+                                    servingCount = servingCount,
+                                    unitLabel = food.unitLabel
                                 )
                             )
-                        }
-                        val editingMeal = mealEditorState?.originalMeal
-                        val savedMeal = meal.copy(date = editingMeal?.date ?: selectedDate)
-                        if (editingMeal != null) {
-                            val editingIndex = meals.indexOfFirst { it === editingMeal }
-                            if (editingIndex >= 0) {
-                                meals[editingIndex] = savedMeal
+                            recordTags.forEach { tag -> if (tags.none { it == tag }) tags.add(tag) }
+                        },
+                        onAddWater = { amountMl ->
+                            waterRecords.add(
+                                0,
+                                WaterRecord(
+                                    id = (waterRecords.maxOfOrNull { it.id } ?: 0L) + 1L,
+                                    date = selectedDate,
+                                    amountMl = amountMl
+                                )
+                            )
+                        },
+                        onDeleteWater = { record -> waterRecords.remove(record) },
+                        onSaveExerciseBurn = { record ->
+                            exerciseBurnRecords.removeAll { it.date == selectedDate }
+                            if (record.calories > 0) {
+                                exerciseBurnRecords.add(record.copy(date = selectedDate))
+                            }
+                        },
+                        onClearExerciseBurn = {
+                            exerciseBurnRecords.removeAll { it.date == selectedDate }
+                        },
+                        onEditMeal = { meal ->
+                            mealEditorState = MealEditorState(meal)
+                            currentScreen = Screen.AddMeal
+                        },
+                        onDeleteMeal = { meal -> meals.remove(meal) },
+                        onClearMeals = { meals.removeAll { it.date == selectedDate } }
+                    )
+
+                    Screen.AddMeal -> AddMealScreen(
+                        tags = tags,
+                        aiSettingsList = aiSettingsList,
+                        initialMeal = mealEditorState?.originalMeal,
+                        onBack = {
+                            mealEditorState = null
+                            currentScreen = Screen.Home
+                        },
+                        onAddPresetTag = { tag -> if (tags.none { it == tag }) tags.add(tag) },
+                        onSave = { meal, saveToLibrary, libraryCategory ->
+                            if (saveToLibrary && foods.none { it.name.equals(meal.name, ignoreCase = true) }) {
+                                foods.add(
+                                    FoodItem(
+                                        name = meal.name,
+                                        protein = roundOneDecimal(meal.protein / meal.servingCount),
+                                        fat = roundOneDecimal(meal.fat / meal.servingCount),
+                                        carbs = roundOneDecimal(meal.carbs / meal.servingCount),
+                                        servingType = meal.servingType,
+                                        category = libraryCategory,
+                                        unitLabel = meal.unitLabel
+                                    )
+                                )
+                            }
+                            val editingMeal = mealEditorState?.originalMeal
+                            val savedMeal = meal.copy(date = editingMeal?.date ?: selectedDate)
+                            if (editingMeal != null) {
+                                val editingIndex = meals.indexOfFirst { it === editingMeal }
+                                if (editingIndex >= 0) {
+                                    meals[editingIndex] = savedMeal
+                                } else {
+                                    meals.add(0, savedMeal)
+                                }
                             } else {
                                 meals.add(0, savedMeal)
                             }
-                        } else {
-                            meals.add(0, savedMeal)
+                            mealEditorState = null
+                            currentScreen = Screen.Home
                         }
-                        mealEditorState = null
-                        currentScreen = Screen.Home
-                    }
-                )
+                    )
 
-                Screen.Plan -> PlanScreen(
-                    selectedDate = selectedDate,
-                    plans = plans,
-                    selectedPlanId = dailyPlanSelections.firstOrNull { it.date == selectedDate }?.planId
-                        ?: plans.firstOrNull { it.isDefault }?.id,
-                    onBack = { currentScreen = Screen.Home },
-                    onSelectPlanForDate = { planId ->
-                        val existingIndex = dailyPlanSelections.indexOfFirst { it.date == selectedDate }
-                        if (existingIndex >= 0) {
-                            dailyPlanSelections[existingIndex] = DailyPlanSelection(selectedDate, planId)
-                        } else {
-                            dailyPlanSelections.add(DailyPlanSelection(selectedDate, planId))
-                        }
-                        val selectedPlan = plans.firstOrNull { it.id == planId }
-                        if (selectedPlan != null) {
-                            targetCalories = selectedPlan.targetCalories
-                            targetProtein = selectedPlan.targetProtein
-                            targetFat = selectedPlan.targetFat
-                            targetCarbs = selectedPlan.targetCarbs
-                        }
-                    },
-                    onSavePlan = { plan ->
-                        val existingIndex = plans.indexOfFirst { it.id == plan.id }
-                        if (existingIndex >= 0) {
-                            plans[existingIndex] = plan.copy(isDefault = if (plan.isDefault) true else plans[existingIndex].isDefault)
-                        } else {
-                            plans.add(plan)
-                        }
-                        if (plan.isDefault) {
-                            plans.replaceAll { existing ->
-                                if (existing.id == plan.id) plan.copy(isDefault = true) else existing.copy(isDefault = false)
+                    Screen.Plan -> PlanScreen(
+                        selectedDate = selectedDate,
+                        userProfile = userProfile,
+                        plans = plans,
+                        selectedPlanId = dailyPlanSelections.firstOrNull { it.date == selectedDate }?.planId
+                            ?: plans.firstOrNull { it.isDefault }?.id,
+                        onBack = { currentScreen = Screen.Home },
+                        onSaveUserProfile = { userProfile = it },
+                        onSelectPlanForDate = { planId ->
+                            val existingIndex = dailyPlanSelections.indexOfFirst { it.date == selectedDate }
+                            if (existingIndex >= 0) {
+                                dailyPlanSelections[existingIndex] = DailyPlanSelection(selectedDate, planId)
+                            } else {
+                                dailyPlanSelections.add(DailyPlanSelection(selectedDate, planId))
                             }
+                            val selectedPlan = plans.firstOrNull { it.id == planId }
+                            if (selectedPlan != null) {
+                                targetCalories = selectedPlan.targetCalories
+                                targetProtein = selectedPlan.targetProtein
+                                targetFat = selectedPlan.targetFat
+                                targetCarbs = selectedPlan.targetCarbs
+                            }
+                        },
+                        onSavePlan = { plan ->
+                            val existingIndex = plans.indexOfFirst { it.id == plan.id }
+                            if (existingIndex >= 0) {
+                                plans[existingIndex] = plan.copy(isDefault = if (plan.isDefault) true else plans[existingIndex].isDefault)
+                            } else {
+                                plans.add(plan)
+                            }
+                            if (plan.isDefault) {
+                                plans.replaceAll { existing ->
+                                    if (existing.id == plan.id) plan.copy(isDefault = true) else existing.copy(isDefault = false)
+                                }
+                            }
+                            if (dailyPlanSelections.none { it.date == selectedDate }) {
+                                dailyPlanSelections.add(DailyPlanSelection(selectedDate, plan.id))
+                            }
+                        },
+                        onDeletePlan = { planId ->
+                            plans.removeAll { it.id == planId }
+                            dailyPlanSelections.removeAll { it.planId == planId }
+                            val fallbackPlan = plans.firstOrNull { it.isDefault } ?: plans.firstOrNull()
+                            if (fallbackPlan != null) {
+                                targetCalories = fallbackPlan.targetCalories
+                                targetProtein = fallbackPlan.targetProtein
+                                targetFat = fallbackPlan.targetFat
+                                targetCarbs = fallbackPlan.targetCarbs
+                            }
+                        },
+                        onSetDefaultPlan = { planId ->
+                            plans.replaceAll { plan -> plan.copy(isDefault = plan.id == planId) }
                         }
-                        if (dailyPlanSelections.none { it.date == selectedDate }) {
-                            dailyPlanSelections.add(DailyPlanSelection(selectedDate, plan.id))
+                    )
+
+                    Screen.History -> HistoryScreen(
+                        meals = meals,
+                        waterRecords = waterRecords,
+                        exerciseBurnRecords = exerciseBurnRecords,
+                        plans = plans,
+                        dailyPlanSelections = dailyPlanSelections,
+                        selectedDate = selectedDate,
+                        onBack = { currentScreen = Screen.Home },
+                        onSelectDate = { date ->
+                            selectedDate = date
+                            currentScreen = Screen.Home
                         }
-                    },
-                    onDeletePlan = { planId ->
-                        plans.removeAll { it.id == planId }
-                        dailyPlanSelections.removeAll { it.planId == planId }
-                        val fallbackPlan = plans.firstOrNull { it.isDefault } ?: plans.firstOrNull()
-                        if (fallbackPlan != null) {
-                            targetCalories = fallbackPlan.targetCalories
-                            targetProtein = fallbackPlan.targetProtein
-                            targetFat = fallbackPlan.targetFat
-                            targetCarbs = fallbackPlan.targetCarbs
-                        }
-                    },
-                    onSetDefaultPlan = { planId ->
-                        plans.replaceAll { plan -> plan.copy(isDefault = plan.id == planId) }
-                    }
-                )
+                    )
 
-                Screen.History -> HistoryScreen(
-                    meals = meals,
-                    waterRecords = waterRecords,
-                    exerciseBurnRecords = exerciseBurnRecords,
-                    plans = plans,
-                    dailyPlanSelections = dailyPlanSelections,
-                    selectedDate = selectedDate,
-                    onBack = { currentScreen = Screen.Home },
-                    onSelectDate = { date ->
-                        selectedDate = date
-                        currentScreen = Screen.Home
-                    }
-                )
+                    Screen.Report -> ReportScreen(
+                        selectedDate = selectedDate,
+                        plan = currentPlan,
+                        meals = meals.filter { it.date == selectedDate },
+                        exerciseBurnRecord = selectedExerciseBurn,
+                        adjustedTargetCalories = adjustedTargetCalories,
+                        adjustedTargetProtein = adjustedTargetProtein,
+                        adjustedTargetCarbs = adjustedTargetCarbs,
+                        waterTargetMl = activeWaterTargetMl,
+                        drunkWaterMl = drunkWaterMl,
+                        aiSettingsList = aiSettingsList,
+                        onBack = { currentScreen = Screen.Home }
+                    )
 
-                Screen.Report -> ReportScreen(
-                    selectedDate = selectedDate,
-                    plan = currentPlan,
-                    meals = meals.filter { it.date == selectedDate },
-                    exerciseBurnRecord = selectedExerciseBurn,
-                    adjustedTargetCalories = adjustedTargetCalories,
-                    adjustedTargetProtein = adjustedTargetProtein,
-                    adjustedTargetCarbs = adjustedTargetCarbs,
-                    waterTargetMl = activeWaterTargetMl,
-                    drunkWaterMl = drunkWaterMl,
-                    aiSettingsList = aiSettingsList,
-                    onBack = { currentScreen = Screen.Home }
-                )
+                    Screen.Sponsor -> SponsorScreen(
+                        onBack = { currentScreen = Screen.Home }
+                    )
 
-                Screen.Sponsor -> SponsorScreen(
-                    onBack = { currentScreen = Screen.Home }
-                )
+                    Screen.AuthorWords -> AuthorWordsScreen(
+                        onBack = { currentScreen = Screen.Home }
+                    )
 
-                Screen.AuthorWords -> AuthorWordsScreen(
-                    onBack = { currentScreen = Screen.Home }
-                )
-
-                Screen.FoodLibrary -> FoodLibraryScreen(
-                    foods = foods,
-                    tags = tags,
-                    onBack = { currentScreen = Screen.Home },
-                    onUseFood = { food, quantity, recordTags ->
-                        val servingCount = servingCountFromQuantity(quantity, food.servingType)
-                        val totalProtein = (food.protein * servingCount).toInt()
-                        val totalFat = (food.fat * servingCount).toInt()
-                        val totalCarbs = (food.carbs * servingCount).toInt()
-                        meals.add(
-                            0,
-                            MealRecord(
-                                name = food.name,
-                                calories = calculateCalories(totalProtein, totalFat, totalCarbs),
-                                protein = totalProtein,
-                                fat = totalFat,
-                                carbs = totalCarbs,
-                                time = currentTimeText(),
-                                date = selectedDate,
-                                tags = recordTags,
-                                servingType = food.servingType,
-                                quantity = quantity,
-                                servingCount = servingCount
+                    Screen.FoodLibrary -> FoodLibraryScreen(
+                        foods = foods,
+                        tags = tags,
+                        onBack = { currentScreen = Screen.Home },
+                        onUseFood = { food, quantity, recordTags ->
+                            val servingCount = servingCountFromQuantity(quantity, food.servingType)
+                            val totalProtein = roundOneDecimal(food.protein * servingCount)
+                            val totalFat = roundOneDecimal(food.fat * servingCount)
+                            val totalCarbs = roundOneDecimal(food.carbs * servingCount)
+                            meals.add(
+                                0,
+                                MealRecord(
+                                    name = food.name,
+                                    calories = calculateCalories(totalProtein, totalFat, totalCarbs),
+                                    protein = totalProtein,
+                                    fat = totalFat,
+                                    carbs = totalCarbs,
+                                    time = currentTimeText(),
+                                    date = selectedDate,
+                                    tags = recordTags,
+                                    servingType = food.servingType,
+                                    quantity = quantity,
+                                    servingCount = servingCount,
+                                    unitLabel = food.unitLabel
+                                )
                             )
-                        )
-                        recordTags.forEach { tag -> if (tags.none { it == tag }) tags.add(tag) }
-                        currentScreen = Screen.Home
-                    },
-                    onDeleteFood = { food -> foods.remove(food) },
-                    onClearFoods = { foods.clear() },
-                    onUpdateFood = { index, updatedFood -> foods[index] = updatedFood },
-                    onAddFood = { newFood -> foods.add(newFood) }
-                )
+                            recordTags.forEach { tag -> if (tags.none { it == tag }) tags.add(tag) }
+                            currentScreen = Screen.Home
+                        },
+                        onDeleteFood = { food -> foods.remove(food) },
+                        onClearFoods = { foods.clear() },
+                        onUpdateFood = { index, updatedFood -> foods[index] = updatedFood },
+                        onAddFood = { newFood -> foods.add(newFood) }
+                    )
+                }
             }
         }
     }
@@ -662,19 +839,21 @@ fun CalorieFreeApp() {
 @Composable
 fun HomeScreen(
     planName: String,
-    targetCalories: Int,
-    targetProtein: Int,
-    targetFat: Int,
-    targetCarbs: Int,
-    baseTargetCalories: Int,
-    baseTargetProtein: Int,
-    baseTargetCarbs: Int,
+    targetCalories: Double,
+    targetProtein: Double,
+    targetFat: Double,
+    targetCarbs: Double,
+    userProfile: UserProfile,
+    baseTargetCalories: Double,
+    baseTargetProtein: Double,
+    baseTargetCarbs: Double,
     exerciseBurnRecord: ExerciseBurnRecord?,
     textWorkAiSettings: AiSettings?,
-    waterTargetMl: Int,
-    drunkWaterMl: Int,
+    waterTargetMl: Double,
+    drunkWaterMl: Double,
     waterRecords: List<WaterRecord>,
     meals: List<MealRecord>,
+    allMeals: List<MealRecord>,
     recentFoods: List<FoodItem>,
     selectedDate: String,
     onPreviousDayClick: () -> Unit,
@@ -689,7 +868,7 @@ fun HomeScreen(
     onAuthorWordsClick: () -> Unit,
     onAiSettingsClick: () -> Unit,
     onQuickAddFood: (FoodItem, Double, List<String>) -> Unit,
-    onAddWater: (Int) -> Unit,
+    onAddWater: (Double) -> Unit,
     onDeleteWater: (WaterRecord) -> Unit,
     onSaveExerciseBurn: (ExerciseBurnRecord) -> Unit,
     onClearExerciseBurn: () -> Unit,
@@ -706,6 +885,34 @@ fun HomeScreen(
     var showClearConfirm by remember { mutableStateOf(false) }
     var showQuickAddDialog by remember { mutableStateOf(false) }
     var showExerciseBurnDialog by remember { mutableStateOf(false) }
+    var showRemainingEquivalentDialog by remember { mutableStateOf(false) }
+    val remainingProtein = targetProtein - eatenProtein
+    val remainingCarbs = targetCarbs - eatenCarbs
+    val remainingEquivalent = remember(allMeals, remainingProtein, remainingCarbs) {
+        estimateRemainingFoodEquivalent(
+            mealHistory = allMeals,
+            remainingCarbs = remainingCarbs,
+            remainingProtein = remainingProtein
+        )
+    }
+    val basalMetabolism = remember(userProfile) { calculateBasalMetabolism(userProfile) }
+    val shouldShowBmrReminder = basalMetabolism != null && selectedDate <= currentDateText() && eatenCalories < basalMetabolism
+    val recognitionImageType = RecognitionImageType.FoodPhoto
+    var pendingCropBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var pendingCropLabel by remember { mutableStateOf<String?>(null) }
+    var selectedImageDataUrl by remember { mutableStateOf<String?>(null) }
+    var selectedImageLabel by remember { mutableStateOf<String?>(null) }
+    var showAiAnalysisDialog by remember { mutableStateOf(false) }
+    var errorText by remember { mutableStateOf<String?>(null) }
+
+    if (showRemainingEquivalentDialog) {
+        RemainingFoodEquivalentDialog(
+            remainingCarbs = remainingCarbs,
+            remainingProtein = remainingProtein,
+            equivalent = remainingEquivalent,
+            onDismiss = { showRemainingEquivalentDialog = false }
+        )
+    }
 
     mealPendingDelete?.let { meal ->
         ConfirmDialog(
@@ -736,7 +943,7 @@ fun HomeScreen(
     if (showQuickAddDialog) {
         QuickAddFoodDialog(
             foods = recentFoods,
-            tags = listOf("早餐", "午餐", "晚餐", "零食", "加餐"),
+            tags = MEAL_OCCASION_TAGS,
             onDismiss = { showQuickAddDialog = false },
             onConfirm = { food, quantity, recordTags ->
                 onQuickAddFood(food, quantity, recordTags)
@@ -763,6 +970,34 @@ fun HomeScreen(
     }
 
     AppBackground {
+        pendingCropBitmap?.let { bitmap ->
+            ImageCropDialog(
+                bitmap = bitmap,
+                imageType = recognitionImageType,
+                sourceLabel = pendingCropLabel,
+                onDismiss = {
+                    pendingCropBitmap = null
+                    pendingCropLabel = null
+                },
+                onUseOriginal = { originalBitmap ->
+                    selectedImageDataUrl = bitmapToRecognitionDataUrl(originalBitmap, recognitionImageType)
+                    selectedImageLabel = pendingCropLabel
+                    pendingCropBitmap = null
+                    pendingCropLabel = null
+                    showAiAnalysisDialog = true
+                    errorText = null
+                },
+                onConfirmCrop = { croppedBitmap ->
+                    selectedImageDataUrl = bitmapToRecognitionDataUrl(croppedBitmap, recognitionImageType)
+                    selectedImageLabel = listOfNotNull(pendingCropLabel, "已截取").joinToString(" · ")
+                    pendingCropBitmap = null
+                    pendingCropLabel = null
+                    showAiAnalysisDialog = true
+                    errorText = null
+                }
+            )
+        }
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -817,28 +1052,47 @@ fun HomeScreen(
                 onClick = { showExerciseBurnDialog = true }
             )
 
-            Text(
-                text = "营养进度",
-                fontSize = 20.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = Color(0xFF161A23)
-            )
+            if (shouldShowBmrReminder) {
+                BmrReminderCard(
+                    basalMetabolism = basalMetabolism ?: 0.0,
+                    eatenCalories = eatenCalories
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "营养进度",
+                    modifier = Modifier.weight(1f),
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color(0xFF161A23)
+                )
+                OutlinedButton(
+                    onClick = { showRemainingEquivalentDialog = true },
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Text(text = "剩余能吃什么", fontSize = 12.sp)
+                }
+            }
 
             NutritionRow(
                 label = "碳水",
-                value = "$eatenCarbs / $targetCarbs g",
+                value = "${formatNumber(eatenCarbs)} / ${formatNumber(targetCarbs)} g",
                 color = Color(0xFF66BB6A),
                 progress = nutritionProgress(eatenCarbs, targetCarbs)
             )
             NutritionRow(
                 label = "蛋白质",
-                value = "$eatenProtein / $targetProtein g",
+                value = "${formatNumber(eatenProtein)} / ${formatNumber(targetProtein)} g",
                 color = Color(0xFF5B8DEF),
                 progress = nutritionProgress(eatenProtein, targetProtein)
             )
             NutritionRow(
                 label = "脂肪",
-                value = "$eatenFat / $targetFat g",
+                value = "${formatNumber(eatenFat)} / ${formatNumber(targetFat)} g",
                 color = Color(0xFFFFA726),
                 progress = nutritionProgress(eatenFat, targetFat)
             )
@@ -955,7 +1209,7 @@ fun HomeScreen(
                 mealsByTag.forEach { (tag, tagMeals) ->
                     val tagCalories = tagMeals.sumOf { it.calories }
                     Text(
-                        text = "$tag · $tagCalories kcal",
+                        text = "$tag · ${formatNumber(tagCalories)} kcal",
                         fontSize = 16.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = Color(0xFF5B8DEF)
@@ -963,10 +1217,10 @@ fun HomeScreen(
                     tagMeals.forEach { meal ->
                         MealCard(
                             name = meal.name,
-                            calories = "${meal.calories} kcal",
+                            calories = "${formatNumber(meal.calories)} kcal",
                             amountText = mealAmountText(meal),
                             tagText = meal.tags.joinToString(" · "),
-                            nutritionText = "碳水${meal.carbs}g · 蛋白${meal.protein}g · 脂肪${meal.fat}g",
+                            nutritionText = "碳水${formatNumber(meal.carbs)}g · 蛋白${formatNumber(meal.protein)}g · 脂肪${formatNumber(meal.fat)}g",
                             onEdit = { onEditMeal(meal) },
                             onDelete = { mealPendingDelete = meal }
                         )
@@ -993,14 +1247,15 @@ fun AddMealScreen(
     val context = LocalContext.current
     val initialServingCount = initialMeal?.servingCount?.takeIf { it > 0 } ?: 1.0
     var name by remember(initialMeal) { mutableStateOf(initialMeal?.name.orEmpty()) }
-    var perServingProtein by remember(initialMeal) { mutableStateOf(initialMeal?.let { (it.protein / initialServingCount).toInt().toString() }.orEmpty()) }
-    var perServingFat by remember(initialMeal) { mutableStateOf(initialMeal?.let { (it.fat / initialServingCount).toInt().toString() }.orEmpty()) }
-    var perServingCarbs by remember(initialMeal) { mutableStateOf(initialMeal?.let { (it.carbs / initialServingCount).toInt().toString() }.orEmpty()) }
-    var totalProteinInput by remember(initialMeal) { mutableStateOf(initialMeal?.protein?.toString().orEmpty()) }
-    var totalFatInput by remember(initialMeal) { mutableStateOf(initialMeal?.fat?.toString().orEmpty()) }
-    var totalCarbsInput by remember(initialMeal) { mutableStateOf(initialMeal?.carbs?.toString().orEmpty()) }
-    var quantityText by remember(initialMeal) { mutableStateOf(initialMeal?.quantity?.let(::formatServingCount).orEmpty()) }
+    var perServingProtein by remember(initialMeal) { mutableStateOf(initialMeal?.let { formatNumber(it.protein / initialServingCount) }.orEmpty()) }
+    var perServingFat by remember(initialMeal) { mutableStateOf(initialMeal?.let { formatNumber(it.fat / initialServingCount) }.orEmpty()) }
+    var perServingCarbs by remember(initialMeal) { mutableStateOf(initialMeal?.let { formatNumber(it.carbs / initialServingCount) }.orEmpty()) }
+    var totalProteinInput by remember(initialMeal) { mutableStateOf(initialMeal?.protein?.let(::formatNumber).orEmpty()) }
+    var totalFatInput by remember(initialMeal) { mutableStateOf(initialMeal?.fat?.let(::formatNumber).orEmpty()) }
+    var totalCarbsInput by remember(initialMeal) { mutableStateOf(initialMeal?.carbs?.let(::formatNumber).orEmpty()) }
+    var quantityText by remember(initialMeal) { mutableStateOf(initialMeal?.quantity?.takeIf { it > 0 }?.let(::formatServingCount).orEmpty()) }
     var servingType by remember(initialMeal) { mutableStateOf(initialMeal?.servingType ?: ServingType.Per100g) }
+    var unitLabel by remember(initialMeal) { mutableStateOf(initialMeal?.unitLabel?.takeIf { it.isNotBlank() } ?: "个") }
     var inputMode by remember(initialMeal) { mutableStateOf(if (initialMeal == null) NutritionInputMode.PerServing else NutritionInputMode.Total) }
     var customTag by remember(initialMeal) { mutableStateOf(initialMeal?.tags?.joinToString(";").orEmpty()) }
     var aiFoodDescription by remember(initialMeal) { mutableStateOf("") }
@@ -1011,11 +1266,15 @@ fun AddMealScreen(
     var selectedImageDataUrl by remember(initialMeal) { mutableStateOf<String?>(null) }
     var selectedImageLabel by remember(initialMeal) { mutableStateOf<String?>(null) }
     var recognitionImageType by remember(initialMeal) { mutableStateOf(RecognitionImageType.FoodPhoto) }
+    var pendingCropBitmap by remember(initialMeal) { mutableStateOf<Bitmap?>(null) }
+    var pendingCropLabel by remember(initialMeal) { mutableStateOf<String?>(null) }
+    var pendingCameraImageUri by remember(initialMeal) { mutableStateOf<Uri?>(null) }
+    var showAiAccuracyTipsDialog by remember(initialMeal) { mutableStateOf(false) }
     var errorText by remember(initialMeal) { mutableStateOf<String?>(null) }
-    val hasVisionWorkingAi = aiSettingsList.any { it.enabled && it.selectedForVisionWork && it.supportsVision && it.apiKey.isNotBlank() && it.baseUrl.isNotBlank() }
+    val hasVisionWorkingAi = aiSettingsList.any { it.enabled && it.selectedForVisionWork && it.canHandleVisionTasks() && it.apiKey.isNotBlank() && it.baseUrl.isNotBlank() }
     val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
-            val imageDataUrl = imageDataUrlFromUri(context, uri)
+            val imageDataUrl = imageDataUrlFromUri(context, uri, recognitionImageType)
             if (imageDataUrl != null) {
                 selectedImageDataUrl = imageDataUrl
                 selectedImageLabel = "相册图片 · ${if (recognitionImageType == RecognitionImageType.NutritionLabel) "营养成分表" else "食物照片"}"
@@ -1028,7 +1287,7 @@ fun AddMealScreen(
     }
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
         if (bitmap != null) {
-            selectedImageDataUrl = bitmapToJpegDataUrl(bitmap)
+            selectedImageDataUrl = bitmapToRecognitionDataUrl(bitmap, recognitionImageType)
             selectedImageLabel = "相机照片 · ${if (recognitionImageType == RecognitionImageType.NutritionLabel) "营养成分表" else "食物照片"}"
             showAiAnalysisDialog = true
             errorText = null
@@ -1036,28 +1295,93 @@ fun AddMealScreen(
             errorText = "没有获取到照片，请重新拍摄"
         }
     }
+    val galleryCropLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            val selectedBitmap = bitmapFromUri(context, uri)
+            if (selectedBitmap != null) {
+                pendingCropBitmap = selectedBitmap
+                pendingCropLabel = "相册图片 · ${if (recognitionImageType == RecognitionImageType.NutritionLabel) "营养成分表" else "食物照片"}"
+                errorText = null
+            } else {
+                errorText = "图片读取失败，请换一张照片再试"
+            }
+        }
+    }
+    val cameraCropLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
+        if (bitmap != null) {
+            pendingCropBitmap = bitmap
+            pendingCropLabel = "相机照片 · ${if (recognitionImageType == RecognitionImageType.NutritionLabel) "营养成分表" else "食物照片"}"
+            errorText = null
+        } else {
+            errorText = "没有获取到照片，请重新拍摄"
+        }
+    }
+    val cameraFullResLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        val captureUri = pendingCameraImageUri
+        if (success && captureUri != null) {
+            val capturedBitmap = bitmapFromUri(context, captureUri)
+            if (capturedBitmap != null) {
+                pendingCropBitmap = capturedBitmap
+                pendingCropLabel = "相机照片 · ${if (recognitionImageType == RecognitionImageType.NutritionLabel) "营养成分表" else "食物照片"}"
+                errorText = null
+            } else {
+                errorText = "照片读取失败，请重新拍摄"
+            }
+        } else {
+            errorText = "没有获取到照片，请重新拍摄"
+        }
+        pendingCameraImageUri = null
+    }
     val protein = if (inputMode == NutritionInputMode.PerServing) perServingProtein else totalProteinInput
     val fat = if (inputMode == NutritionInputMode.PerServing) perServingFat else totalFatInput
     val carbs = if (inputMode == NutritionInputMode.PerServing) perServingCarbs else totalCarbsInput
     val quantity = quantityText.toDoubleOrNull() ?: 0.0
     val servingBaseAmount = if (servingType == ServingType.PerItem) 1.0 else 100.0
     val inputCalories = calculateCalories(
-        protein = protein.toIntOrNull() ?: 0,
-        fat = fat.toIntOrNull() ?: 0,
-        carbs = carbs.toIntOrNull() ?: 0
+        protein = parseOneDecimal(protein) ?: 0.0,
+        fat = parseOneDecimal(fat) ?: 0.0,
+        carbs = parseOneDecimal(carbs) ?: 0.0
     )
     val previewTotalCalories = if (inputMode == NutritionInputMode.PerServing) {
-        (inputCalories * quantity / servingBaseAmount).toInt()
+        roundOneDecimal(inputCalories * quantity / servingBaseAmount)
     } else {
         inputCalories
     }
     val previewFormulaText = if (inputMode == NutritionInputMode.PerServing && quantity > 0) {
-        "自动计算热量：${inputCalories}kcal/${if (servingType == ServingType.PerItem) "个" else "100g"} × ${formatServingCount(quantity)}${if (servingType == ServingType.PerItem) "个" else "g"} = ${previewTotalCalories} kcal"
+        "自动计算热量：${formatNumber(inputCalories)}kcal/${servingTypeLabel(servingType, unitLabel)} × ${formatServingCount(quantity)}${quantityUnitText(servingType, unitLabel)} = ${formatNumber(previewTotalCalories)} kcal"
     } else {
-        "自动计算热量：${previewTotalCalories} kcal"
+        "自动计算热量：${formatNumber(previewTotalCalories)} kcal"
     }
 
     AppBackground {
+        pendingCropBitmap?.let { bitmap ->
+            ImageCropDialog(
+                bitmap = bitmap,
+                imageType = recognitionImageType,
+                sourceLabel = pendingCropLabel,
+                onDismiss = {
+                    pendingCropBitmap = null
+                    pendingCropLabel = null
+                },
+                onUseOriginal = { originalBitmap ->
+                    selectedImageDataUrl = bitmapToRecognitionDataUrl(originalBitmap, recognitionImageType)
+                    selectedImageLabel = pendingCropLabel
+                    pendingCropBitmap = null
+                    pendingCropLabel = null
+                    showAiAnalysisDialog = true
+                    errorText = null
+                },
+                onConfirmCrop = { croppedBitmap ->
+                    selectedImageDataUrl = bitmapToRecognitionDataUrl(croppedBitmap, recognitionImageType)
+                    selectedImageLabel = listOfNotNull(pendingCropLabel, "已截取").joinToString(" · ")
+                    pendingCropBitmap = null
+                    pendingCropLabel = null
+                    showAiAnalysisDialog = true
+                    errorText = null
+                }
+            )
+        }
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -1093,21 +1417,25 @@ fun AddMealScreen(
                 imageLabel = selectedImageLabel,
                 imageType = recognitionImageType,
                 onDismiss = { showAiAnalysisDialog = false },
-                onApplySuggestion = { suggestedTags, shouldSaveToLibrary, suggestedCategory ->
-                    customTag = suggestedTags.joinToString(";")
+                onApplySuggestion = { _, shouldSaveToLibrary, suggestedCategory ->
                     saveToLibrary = shouldSaveToLibrary
                     libraryCategory = suggestedCategory
                     showAiAnalysisDialog = false
                 },
-                onApplyRecognizedFood = { recognizedFood, suggestedQuantity, suggestedTags ->
+                onApplyRecognizedFood = { recognizedFood, suggestedQuantity, _ ->
+                    val recognizedServingCount = servingCountFromQuantity(suggestedQuantity, recognizedFood.servingType)
+                    val recognizedTotalProtein = roundOneDecimal(recognizedFood.protein * recognizedServingCount)
+                    val recognizedTotalFat = roundOneDecimal(recognizedFood.fat * recognizedServingCount)
+                    val recognizedTotalCarbs = roundOneDecimal(recognizedFood.carbs * recognizedServingCount)
                     name = recognizedFood.name
-                    perServingProtein = recognizedFood.protein.toString()
-                    perServingFat = recognizedFood.fat.toString()
-                    perServingCarbs = recognizedFood.carbs.toString()
+                    perServingProtein = formatNumber(recognizedFood.protein)
+                    perServingFat = formatNumber(recognizedFood.fat)
+                    perServingCarbs = formatNumber(recognizedFood.carbs)
+                    totalProteinInput = formatNumber(recognizedTotalProtein)
+                    totalFatInput = formatNumber(recognizedTotalFat)
+                    totalCarbsInput = formatNumber(recognizedTotalCarbs)
                     servingType = recognizedFood.servingType
-                    inputMode = NutritionInputMode.PerServing
                     quantityText = formatServingCount(suggestedQuantity)
-                    customTag = suggestedTags.joinToString(";")
                     saveToLibrary = true
                     libraryCategory = recognizedFood.category
                     showAiAnalysisDialog = false
@@ -1148,10 +1476,82 @@ fun AddMealScreen(
                     color = Color(0xFF6F7785)
                 )
                 AppTextField(
-                    label = "AI 识别补充描述（可选，例如：炸鸡柳，表面比较油，肉占比约50%）",
+                    label = "食物文字描述（可选，例如：炸鸡柳，表面比较油，肉占比约50%）",
                     value = aiFoodDescription,
                     onValueChange = { aiFoodDescription = it }
                 )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    Text(
+                        text = "如何提高 AI 分析准确率？",
+                        modifier = Modifier.clickable { showAiAccuracyTipsDialog = true },
+                        fontSize = 12.sp,
+                        color = Color(0xFF5B8DEF),
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+                OutlinedButton(
+                    onClick = { showAiAnalysisDialog = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Text(text = "通过文字描述分析食物", fontSize = 15.sp)
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            if (hasVisionWorkingAi) {
+                                val captureUri = createTempCameraImageUri(context)
+                                if (captureUri != null) {
+                                    pendingCameraImageUri = captureUri
+                                    cameraFullResLauncher.launch(captureUri)
+                                } else {
+                                    errorText = "无法创建相机照片文件，请稍后再试"
+                                }
+                            } else {
+                                errorText = "没有可用的图片识别工作 AI。请先在 AI 设置中启用支持图片的模型并填写 API Key。"
+                            }
+                        },
+                        enabled = hasVisionWorkingAi,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Text(text = "拍照识别", fontSize = 14.sp)
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            if (hasVisionWorkingAi) {
+                                galleryCropLauncher.launch("image/*")
+                            } else {
+                                errorText = "没有可用的图片识别工作 AI。请先在 AI 设置中启用支持图片的模型并填写 API Key。"
+                            }
+                        },
+                        enabled = hasVisionWorkingAi,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Text(text = "相册识别", fontSize = 14.sp)
+                    }
+                }
+                selectedImageLabel?.let { label ->
+                    Text(
+                        text = "已选择：$label，打开 AI 分析时会优先识别图片内容。",
+                        fontSize = 12.sp,
+                        color = Color(0xFF6F7785)
+                    )
+                }
+                if (!hasVisionWorkingAi) {
+                    Text(
+                        text = "拍照/相册识别需要至少一个已启用、已选为图片识别工作 AI、支持图片且已填写 API Key 的模型。",
+                        fontSize = 12.sp,
+                        color = Color(0xFFEF5350)
+                    )
+                }
             }
 
             FormCard {
@@ -1180,7 +1580,7 @@ fun AddMealScreen(
                     horizontalArrangement = Arrangement.spacedBy(0.dp)
                 ) {
                     WebStyleTab(
-                        text = "记录${servingTypeLabel(servingType)}营养",
+                        text = "记录${servingTypeLabel(servingType, unitLabel)}营养",
                         selected = inputMode == NutritionInputMode.PerServing,
                         onClick = { inputMode = NutritionInputMode.PerServing },
                         modifier = Modifier.weight(1f)
@@ -1193,20 +1593,27 @@ fun AddMealScreen(
                     )
                 }
                 if (inputMode == NutritionInputMode.PerServing) {
-                    AppTextField(label = "${servingTypeLabel(servingType)}碳水 g", value = perServingCarbs, onValueChange = { perServingCarbs = it }, isNumber = true)
-                    AppTextField(label = "${servingTypeLabel(servingType)}蛋白质 g", value = perServingProtein, onValueChange = { perServingProtein = it }, isNumber = true)
-                    AppTextField(label = "${servingTypeLabel(servingType)}脂肪 g", value = perServingFat, onValueChange = { perServingFat = it }, isNumber = true)
+                    AppTextField(label = "${servingTypeLabel(servingType, unitLabel)}碳水 g", value = perServingCarbs, onValueChange = { perServingCarbs = it }, isNumber = true)
+                    AppTextField(label = "${servingTypeLabel(servingType, unitLabel)}蛋白质 g", value = perServingProtein, onValueChange = { perServingProtein = it }, isNumber = true)
+                    AppTextField(label = "${servingTypeLabel(servingType, unitLabel)}脂肪 g", value = perServingFat, onValueChange = { perServingFat = it }, isNumber = true)
                 } else {
                     AppTextField(label = "总碳水 g", value = totalCarbsInput, onValueChange = { totalCarbsInput = it }, isNumber = true)
                     AppTextField(label = "总蛋白质 g", value = totalProteinInput, onValueChange = { totalProteinInput = it }, isNumber = true)
                     AppTextField(label = "总脂肪 g", value = totalFatInput, onValueChange = { totalFatInput = it }, isNumber = true)
                 }
                 AppTextField(
-                    label = if (servingType == ServingType.PerItem) "食物总量（个）" else "食物总量（克）",
+                    label = if (servingType == ServingType.PerItem) "食物总量（${unitLabel.ifBlank { "个" }}）" else "食物总量（克）",
                     value = quantityText,
                     onValueChange = { quantityText = it },
                     isNumber = true
                 )
+                if (servingType == ServingType.PerItem) {
+                    AppTextField(
+                        label = "量词（可选，不填默认为个）",
+                        value = if (unitLabel == "个") "" else unitLabel,
+                        onValueChange = { unitLabel = it.trim().ifBlank { "个" } }
+                    )
+                }
                 Text(
                     text = "标签",
                     fontSize = 14.sp,
@@ -1214,30 +1621,32 @@ fun AddMealScreen(
                     color = Color(0xFF303747)
                 )
                 if (tags.isNotEmpty()) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        tags.take(4).forEach { tag ->
-                            OutlinedButton(
-                                onClick = {
-                                    val existingTags = customTag
+                    tags.take(7).chunked(3).forEach { rowTags ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            rowTags.forEach { tag ->
+                                OutlinedButton(
+                                    onClick = {
+                                        val existingTags = customTag
+                                            .split(";", "；", "\n")
+                                            .map { it.trim() }
+                                            .filter { it.isNotBlank() }
+                                        customTag = toggleSelectableTag(existingTags, tag).joinToString(";")
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(14.dp)
+                                ) {
+                                    val currentTags = customTag
                                         .split(";", "；", "\n")
                                         .map { it.trim() }
                                         .filter { it.isNotBlank() }
-                                    customTag = if (existingTags.contains(tag)) {
-                                        existingTags.filter { it != tag }.joinToString(";")
-                                    } else {
-                                        (existingTags + tag).distinct().joinToString(";")
-                                    }
-                                },
-                                shape = RoundedCornerShape(14.dp)
-                            ) {
-                                val currentTags = customTag
-                                    .split(";", "；", "\n")
-                                    .map { it.trim() }
-                                    .filter { it.isNotBlank() }
-                                Text(text = if (currentTags.contains(tag)) "✓ $tag" else tag, fontSize = 12.sp)
+                                    Text(text = if (currentTags.contains(tag)) "✓ $tag" else tag, fontSize = 12.sp, maxLines = 1)
+                                }
+                            }
+                            repeat(3 - rowTags.size) {
+                                Spacer(modifier = Modifier.weight(1f))
                             }
                         }
                     }
@@ -1253,60 +1662,6 @@ fun AddMealScreen(
                     fontWeight = FontWeight.SemiBold,
                     color = Color(0xFF303747)
                 )
-                OutlinedButton(
-                    onClick = { showAiAnalysisDialog = true },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp)
-                ) {
-                    Text(text = "AI 分析此记录", fontSize = 15.sp)
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = {
-                            if (hasVisionWorkingAi) {
-                                cameraLauncher.launch(null)
-                            } else {
-                                errorText = "没有可用的图片识别工作 AI。请先在 AI 设置中启用支持图片的模型并填写 API Key。"
-                            }
-                        },
-                        enabled = hasVisionWorkingAi,
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(16.dp)
-                    ) {
-                        Text(text = "拍照识别", fontSize = 14.sp)
-                    }
-                    OutlinedButton(
-                        onClick = {
-                            if (hasVisionWorkingAi) {
-                                galleryLauncher.launch("image/*")
-                            } else {
-                                errorText = "没有可用的图片识别工作 AI。请先在 AI 设置中启用支持图片的模型并填写 API Key。"
-                            }
-                        },
-                        enabled = hasVisionWorkingAi,
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(16.dp)
-                    ) {
-                        Text(text = "相册识别", fontSize = 14.sp)
-                    }
-                }
-                selectedImageLabel?.let { label ->
-                    Text(
-                        text = "已选择：$label，打开 AI 分析时会优先识别图片内容。",
-                        fontSize = 12.sp,
-                        color = Color(0xFF6F7785)
-                    )
-                }
-                if (!hasVisionWorkingAi) {
-                    Text(
-                        text = "拍照/相册识别需要至少一个已启用、已选为图片识别工作 AI、支持图片且已填写 API Key 的模型。",
-                        fontSize = 12.sp,
-                        color = Color(0xFFEF5350)
-                    )
-                }
                 OutlinedButton(
                     onClick = { saveToLibrary = !saveToLibrary },
                     modifier = Modifier.fillMaxWidth(),
@@ -1336,17 +1691,19 @@ fun AddMealScreen(
 
             Button(
                 onClick = {
-                    val inputProtein = protein.toIntOrNull() ?: 0
-                    val inputFat = fat.toIntOrNull() ?: 0
-                    val inputCarbs = carbs.toIntOrNull() ?: 0
+                    val inputProtein = parseOneDecimal(protein) ?: 0.0
+                    val inputFat = parseOneDecimal(fat) ?: 0.0
+                    val inputCarbs = parseOneDecimal(carbs) ?: 0.0
                     val inputQuantity = quantityText.toDoubleOrNull() ?: 0.0
                     val servings = servingCountFromQuantity(inputQuantity, servingType)
+                    val quantityRequired = inputMode == NutritionInputMode.PerServing || saveToLibrary
 
                     val finalTags = customTag
                         .split(";", "；", "\n")
                         .map { it.trim() }
                         .filter { it.isNotBlank() }
                         .distinct()
+                        .let(::normalizeSelectableTags)
 
                     if (name.isBlank()) {
                         errorText = "请输入食物名称"
@@ -1360,19 +1717,19 @@ fun AddMealScreen(
                         errorText = "营养素不能为负数"
                         return@Button
                     }
-                    if (inputQuantity <= 0 || servings <= 0.0) {
+                    if (quantityRequired && (inputQuantity <= 0 || servings <= 0.0)) {
                         errorText = if (servingType == ServingType.PerItem) "请输入有效个数" else "请输入有效克数"
                         return@Button
                     }
 
-                    val totalProtein: Int
-                    val totalFat: Int
-                    val totalCarbs: Int
+                    val totalProtein: Double
+                    val totalFat: Double
+                    val totalCarbs: Double
 
                     if (inputMode == NutritionInputMode.PerServing) {
-                        totalProtein = (inputProtein * servings).toInt()
-                        totalFat = (inputFat * servings).toInt()
-                        totalCarbs = (inputCarbs * servings).toInt()
+                        totalProtein = roundOneDecimal(inputProtein * servings)
+                        totalFat = roundOneDecimal(inputFat * servings)
+                        totalCarbs = roundOneDecimal(inputCarbs * servings)
                     } else {
                         totalProtein = inputProtein
                         totalFat = inputFat
@@ -1396,6 +1753,9 @@ fun AddMealScreen(
                         libraryCategory
                     }
 
+                    val finalQuantity = if (inputMode == NutritionInputMode.Total && !saveToLibrary && inputQuantity <= 0.0) 0.0 else inputQuantity
+                    val finalServingCount = if (inputMode == NutritionInputMode.Total && !saveToLibrary && inputQuantity <= 0.0) 0.0 else servings
+
                     onSave(
                         MealRecord(
                             name = name.trim(),
@@ -1406,8 +1766,9 @@ fun AddMealScreen(
                             time = initialMeal?.time ?: currentTimeText(),
                             tags = finalTags,
                             servingType = servingType,
-                            quantity = inputQuantity,
-                            servingCount = servings
+                            quantity = finalQuantity,
+                            servingCount = finalServingCount,
+                            unitLabel = normalizedUnitLabel(servingType, unitLabel)
                         ),
                         saveToLibrary,
                         finalLibraryCategory
@@ -1432,6 +1793,28 @@ fun AddMealScreen(
             }
         }
     }
+
+    if (showAiAccuracyTipsDialog) {
+        AlertDialog(
+            onDismissRequest = { showAiAccuracyTipsDialog = false },
+            title = { Text(text = "如何提高 AI 分析准确率？", fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    text = "①详细描述食物特征：名称、食材、比例、烹饪方式、在什么地方用餐\n②一次只拍一份食物\n③设置多个拍照分析 AI 来综合计算，取平均值",
+                    fontSize = 14.sp,
+                    color = Color(0xFF303747)
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = { showAiAccuracyTipsDialog = false },
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Text(text = "知道了")
+                }
+            }
+        )
+    }
 }
 
 @Composable
@@ -1439,37 +1822,113 @@ fun AiSettingsDialog(
     visible: Boolean,
     settingsList: List<AiSettings>,
     onDismiss: () -> Unit,
-    onSave: (List<AiSettings>) -> Unit
+    onUpdate: (List<AiSettings>) -> Unit
 ) {
     if (!visible) return
 
-    val editingSettings = remember(settingsList) { mutableStateListOf<AiSettings>().apply { addAll(settingsList) } }
+    val editingSettings = remember(visible) { mutableStateListOf<AiSettings>().apply { addAll(settingsList) } }
     val coroutineScope = rememberCoroutineScope()
-    var editingId by remember(settingsList) { mutableStateOf(settingsList.firstOrNull()?.id) }
+    var editingId by remember(visible) { mutableStateOf<Long?>(null) }
     val editingAi = editingSettings.firstOrNull { it.id == editingId }
-    var providerName by remember(editingAi) { mutableStateOf(editingAi?.providerName.orEmpty()) }
-    var baseUrl by remember(editingAi) { mutableStateOf(editingAi?.baseUrl.orEmpty()) }
-    var apiKey by remember(editingAi) { mutableStateOf(editingAi?.apiKey.orEmpty()) }
-    var modelName by remember(editingAi) { mutableStateOf(editingAi?.modelName.orEmpty()) }
-    var temperature by remember(editingAi) { mutableStateOf(editingAi?.temperature?.toString() ?: "0.2") }
-    var enabled by remember(editingAi) { mutableStateOf(editingAi?.enabled ?: false) }
-    var selectedForVisionWork by remember(editingAi) { mutableStateOf(editingAi?.selectedForVisionWork ?: false) }
-    var selectedForTextWork by remember(editingAi) { mutableStateOf(editingAi?.selectedForTextWork ?: false) }
-    var supportsVision by remember(editingAi) { mutableStateOf(editingAi?.supportsVision ?: true) }
-    var errorText by remember(settingsList) { mutableStateOf<String?>(null) }
-    var activeTab by remember(settingsList) { mutableStateOf("presets") }
-    var expandedPresetCompany by remember(settingsList) { mutableStateOf<String?>(null) }
-    var expandedPresetSection by remember(settingsList) { mutableStateOf<String?>(null) }
-    var pendingDeleteAiId by remember(settingsList) { mutableStateOf<Long?>(null) }
-    var isTestingAi by remember(settingsList) { mutableStateOf(false) }
-    var isFetchingModels by remember(settingsList) { mutableStateOf(false) }
-    var fetchedModels by remember(settingsList) { mutableStateOf<List<String>>(emptyList()) }
+    var providerName by remember(editingId, visible) { mutableStateOf(editingAi?.providerName.orEmpty()) }
+    var baseUrl by remember(editingId, visible) { mutableStateOf(editingAi?.baseUrl.orEmpty()) }
+    var apiKey by remember(editingId, visible) { mutableStateOf(editingAi?.apiKey.orEmpty()) }
+    var modelName by remember(editingId, visible) { mutableStateOf(editingAi?.modelName.orEmpty()) }
+    var temperature by remember(editingId, visible) { mutableStateOf(editingAi?.temperature?.toString() ?: "0.2") }
+    var enabled by remember(editingId, visible) { mutableStateOf(editingAi?.enabled ?: false) }
+    var selectedForVisionWork by remember(editingId, visible) { mutableStateOf(editingAi?.selectedForVisionWork ?: false) }
+    var selectedForTextWork by remember(editingId, visible) { mutableStateOf(editingAi?.selectedForTextWork ?: false) }
+    var supportsVision by remember(editingId, visible) { mutableStateOf(editingAi?.supportsVision ?: true) }
+    var manualVisionConfirmed by remember(editingId, visible) { mutableStateOf(editingAi?.manualVisionConfirmed ?: false) }
+    var errorText by remember(visible) { mutableStateOf<String?>(null) }
+    var viewMode by remember(settingsList) { mutableStateOf("list") }
+    var expandedPresetCompany by remember(visible) { mutableStateOf<String?>(null) }
+    var expandedPresetSection by remember(visible) { mutableStateOf<String?>(null) }
+    var pendingDeleteAiId by remember(visible) { mutableStateOf<Long?>(null) }
+    var isTestingAi by remember(visible) { mutableStateOf(false) }
+    var isFetchingModels by remember(visible) { mutableStateOf(false) }
+    var fetchedModels by remember(visible) { mutableStateOf<List<String>>(emptyList()) }
+    var showAiHelpDialog by remember(visible) { mutableStateOf(false) }
+    var showPresetPickerDialog by remember(visible) { mutableStateOf(false) }
+    var showModelPickerDialog by remember(visible) { mutableStateOf(false) }
+
+    fun pushSettingsUpdate() {
+        onUpdate(editingSettings.toList())
+    }
+
+    fun replaceEditingSetting(updated: AiSettings) {
+        val index = editingSettings.indexOfFirst { it.id == updated.id }
+        if (index >= 0) {
+            editingSettings[index] = updated
+            pushSettingsUpdate()
+        }
+    }
+
+    fun openConfig(aiId: Long) {
+        editingId = aiId
+        viewMode = "list"
+        errorText = null
+    }
+
     fun currentAiSignature(): String {
         return aiVerificationSignature(providerName, baseUrl, apiKey.trim(), modelName.trim())
     }
     fun currentAiVerified(): Boolean {
         return editingAi?.verifiedSignature?.isNotBlank() == true && editingAi.verifiedSignature == currentAiSignature()
     }
+
+    fun probeVisionUploadFormat(currentSettings: AiSettings, announceSelection: Boolean = false) {
+        isTestingAi = true
+        errorText = "正在询问该模型的图片上传格式..."
+        coroutineScope.launch {
+            val detectedFormat = runCatching {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    withTransientAiRetry { requestVisionImageUploadFormat(currentSettings) }
+                }
+            }
+                .getOrElse { currentSettings.resolvedVisionImageUploadFormat() }
+            isTestingAi = false
+            val latest = editingSettings.firstOrNull { it.id == currentSettings.id } ?: currentSettings
+            replaceEditingSetting(latest.copy(visionImageUploadFormat = detectedFormat))
+            if (announceSelection) {
+                errorText = "已选为图片识别工作 AI，图片上传格式为 ${detectedFormat.displayName()}。"
+            } else {
+                errorText = "已记住该模型的图片上传格式：${detectedFormat.displayName()}。"
+            }
+        }
+    }
+
+    fun draftCurrentEditingAi(): AiSettings? {
+        val currentEditingId = editingId ?: return null
+        val storedAi = editingSettings.firstOrNull { it.id == currentEditingId } ?: return null
+        val normalizedBaseUrl = normalizeAiBaseUrl(
+            baseUrl,
+            providerLooksAnthropicLike(providerName, baseUrl, modelName),
+            providerLooksGeminiLike(providerName, baseUrl, modelName),
+            providerLooksZhipuLike(providerName, baseUrl, modelName)
+        )
+        val signature = aiVerificationSignature(providerName, baseUrl, apiKey.trim(), modelName.trim())
+        val verifiedSignature = if (storedAi.verifiedSignature == signature) storedAi.verifiedSignature else ""
+        return storedAi.copy(
+            providerName = providerName.trim(),
+            baseUrl = normalizedBaseUrl ?: baseUrl.trim(),
+            apiKey = apiKey.trim(),
+            modelName = modelName.trim(),
+            temperature = temperature.toDoubleOrNull() ?: storedAi.temperature,
+            enabled = enabled,
+            selectedForVisionWork = selectedForVisionWork && (supportsVision || manualVisionConfirmed),
+            selectedForTextWork = selectedForTextWork,
+            supportsVision = supportsVision,
+            manualVisionConfirmed = manualVisionConfirmed,
+            visionImageUploadFormat = storedAi.visionImageUploadFormat,
+            verifiedSignature = verifiedSignature
+        )
+    }
+
+    fun syncCurrentEditingAi() {
+        draftCurrentEditingAi()?.let(::replaceEditingSetting)
+    }
+
     fun commitCurrentEditingAi(): Boolean {
         val currentEditingId = editingId ?: return true
         val parsedTemperature = temperature.toDoubleOrNull()
@@ -1502,9 +1961,9 @@ fun AiSettingsDialog(
                 return false
             }
             else -> {
-                val index = editingSettings.indexOfFirst { it.id == currentEditingId }
-                if (index >= 0) {
-                    editingSettings[index] = AiSettings(
+                baseUrl = normalizedBaseUrl
+                replaceEditingSetting(
+                    AiSettings(
                         id = currentEditingId,
                         providerName = providerName.trim(),
                         baseUrl = normalizedBaseUrl,
@@ -1512,13 +1971,67 @@ fun AiSettingsDialog(
                         modelName = modelName.trim(),
                         temperature = parsedTemperature,
                         enabled = enabled,
-                        selectedForVisionWork = selectedForVisionWork && supportsVision,
+                        selectedForVisionWork = selectedForVisionWork && (supportsVision || manualVisionConfirmed),
                         selectedForTextWork = selectedForTextWork,
                         supportsVision = supportsVision,
+                        manualVisionConfirmed = manualVisionConfirmed,
+                        visionImageUploadFormat = editingAi?.visionImageUploadFormat ?: VisionImageUploadFormat.Auto,
                         verifiedSignature = verifiedSignature
                     )
-                }
+                )
                 return true
+            }
+        }
+    }
+
+    fun buildSettingsForModelListFetch(): AiSettings? {
+        val currentEditingId = editingId ?: run {
+            errorText = "褰撳墠娌℃湁鍙厤缃殑 AI 鏉＄洰"
+            return null
+        }
+        val storedAi = editingSettings.firstOrNull { it.id == currentEditingId } ?: run {
+            errorText = "褰撳墠娌℃湁鍙厤缃殑 AI 鏉＄洰"
+            return null
+        }
+        val normalizedBaseUrl = normalizeAiBaseUrl(
+            baseUrl,
+            providerLooksAnthropicLike(providerName, baseUrl, modelName),
+            providerLooksGeminiLike(providerName, baseUrl, modelName),
+            providerLooksZhipuLike(providerName, baseUrl, modelName)
+        )
+        when {
+            baseUrl.isBlank() -> {
+                errorText = "璇疯緭鍏ユ帴鍙ｅ湴鍧€"
+                return null
+            }
+            normalizedBaseUrl == null -> {
+                errorText = "鎺ュ彛鍦板潃闇€涓哄悎娉?http/https 鍦板潃"
+                return null
+            }
+            apiKey.isBlank() -> {
+                errorText = "璇疯緭鍏?API Key"
+                return null
+            }
+            else -> {
+                baseUrl = normalizedBaseUrl
+                val signature = aiVerificationSignature(providerName, normalizedBaseUrl, apiKey.trim(), modelName.trim())
+                val verifiedSignature = if (storedAi.verifiedSignature == signature) storedAi.verifiedSignature else ""
+                val updated = storedAi.copy(
+                    providerName = providerName.trim(),
+                    baseUrl = normalizedBaseUrl,
+                    apiKey = apiKey.trim(),
+                    modelName = modelName.trim(),
+                    temperature = temperature.toDoubleOrNull() ?: storedAi.temperature,
+                    enabled = enabled,
+                    selectedForVisionWork = selectedForVisionWork && (supportsVision || manualVisionConfirmed),
+                    selectedForTextWork = selectedForTextWork,
+                    supportsVision = supportsVision,
+                    manualVisionConfirmed = manualVisionConfirmed,
+                    visionImageUploadFormat = storedAi.visionImageUploadFormat,
+                    verifiedSignature = verifiedSignature
+                )
+                replaceEditingSetting(updated)
+                return updated
             }
         }
     }
@@ -1536,117 +2049,71 @@ fun AiSettingsDialog(
                     fontSize = 12.sp,
                     color = Color(0xFF6F7785)
                 )
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    if (viewMode == "config") {
+                        OutlinedButton(
+                            onClick = {
+                                if (commitCurrentEditingAi()) {
+                                    viewMode = "list"
+                                    errorText = null
+                                }
+                            },
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text(text = "返回 AI 列表", fontSize = 12.sp)
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color.Transparent)
+                            .clickable { showAiHelpDialog = true }
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                    ) {
+                        Text(
+                            text = "不知道怎么设置 AI？",
+                            fontSize = 12.sp,
+                            color = Color(0xFF5B8DEF),
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
                 Text(
-                    text = "图片工作 ${editingSettings.count { it.selectedForVisionWork }} / 3，可用 ${editingSettings.count { it.selectedForVisionWork && it.enabled && it.supportsVision && it.apiKey.isNotBlank() && it.baseUrl.isNotBlank() }} 个 · 文字工作 ${editingSettings.count { it.selectedForTextWork }} / 1，可用 ${editingSettings.count { it.selectedForTextWork && it.enabled && it.apiKey.isNotBlank() && it.baseUrl.isNotBlank() }} 个",
+                    text = "图片工作 ${editingSettings.count { it.selectedForVisionWork }} / 3，可用 ${editingSettings.count { it.selectedForVisionWork && it.enabled && it.canHandleVisionTasks() && it.apiKey.isNotBlank() && it.baseUrl.isNotBlank() }} 个 · 文字工作 ${editingSettings.count { it.selectedForTextWork }} / 1，可用 ${editingSettings.count { it.selectedForTextWork && it.enabled && it.apiKey.isNotBlank() && it.baseUrl.isNotBlank() }} 个",
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = Color(0xFF5B8DEF)
                 )
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    WebStyleTab(
-                        text = "预设",
-                        selected = activeTab == "presets",
-                        onClick = { activeTab = "presets" },
-                        modifier = Modifier.weight(1f)
-                    )
-                    WebStyleTab(
-                        text = "已配置",
-                        selected = activeTab == "configs",
-                        onClick = { activeTab = "configs" },
-                        modifier = Modifier.weight(1f)
-                    )
-                    WebStyleTab(
-                        text = "编辑",
-                        selected = activeTab == "edit",
-                        onClick = { activeTab = "edit" },
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-
-                when (activeTab) {
-                    "presets" -> {
-                        Text(text = "按公司选择预设", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF303747))
-                        defaultAiPresetSections().forEach { section ->
-                            val sectionExpanded = expandedPresetSection == section.sectionName
-                            Card(
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(16.dp),
-                                colors = CardDefaults.cardColors(containerColor = Color(0xBFFFFFFF))
-                            ) {
-                                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clickable {
-                                                expandedPresetSection = if (sectionExpanded) null else section.sectionName
-                                                if (!sectionExpanded) expandedPresetCompany = null
-                                            },
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(text = section.sectionName, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Color(0xFF161A23))
-                                            Text(
-                                                text = "${section.groups.size} 家公司 · ${section.groups.sumOf { it.presets.size }} 个模型",
-                                                fontSize = 12.sp,
-                                                color = Color(0xFF8A92A1)
-                                            )
-                                        }
-                                        Text(text = if (sectionExpanded) "收起" else "展开", fontSize = 12.sp, color = Color(0xFF5B8DEF), fontWeight = FontWeight.SemiBold)
-                                    }
-                                    if (sectionExpanded) {
-                                        section.groups.forEach { group ->
-                                            val companyKey = "${section.sectionName}/${group.companyName}"
-                                            val companyExpanded = expandedPresetCompany == companyKey
-                                            Card(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                shape = RoundedCornerShape(12.dp),
-                                                colors = CardDefaults.cardColors(containerColor = Color(0x66FFFFFF))
-                                            ) {
-                                                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                                                    Row(
-                                                        modifier = Modifier
-                                                            .fillMaxWidth()
-                                                            .clickable {
-                                                                expandedPresetCompany = if (companyExpanded) null else companyKey
-                                                            },
-                                                        verticalAlignment = Alignment.CenterVertically
-                                                    ) {
-                                                        Column(modifier = Modifier.weight(1f)) {
-                                                            Text(text = group.companyName, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF303747))
-                                                            Text(text = "${group.presets.size} 个模型 · ${group.presets.count { it.supportsVision }} 个支持图片", fontSize = 11.sp, color = Color(0xFF8A92A1))
-                                                        }
-                                                        Text(text = if (companyExpanded) "收起" else "展开", fontSize = 11.sp, color = Color(0xFF5B8DEF), fontWeight = FontWeight.SemiBold)
-                                                    }
-                                                    if (companyExpanded) {
-                                                        group.presets.forEach { preset ->
-                                                            OutlinedButton(
-                                                                onClick = {
-                                                                    providerName = preset.providerName
-                                                                    baseUrl = preset.baseUrl
-                                                                    modelName = preset.modelName
-                                                                    temperature = preset.temperature.toString()
-                                                                    supportsVision = preset.supportsVision
-                                                                    activeTab = "edit"
-                                                                    errorText = "已套用 ${preset.modelName}，可填写 API Key 后新增或更新配置"
-                                                                },
-                                                                modifier = Modifier.fillMaxWidth(),
-                                                                shape = RoundedCornerShape(12.dp)
-                                                            ) {
-                                                                Text(text = "${preset.modelName} · ${if (preset.supportsVision) "支持图片" else "文本模型"}", fontSize = 12.sp)
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                when (viewMode) {
+                    "list" -> {
+                        OutlinedButton(
+                            onClick = {
+                                val newId = (editingSettings.maxOfOrNull { it.id } ?: 0L) + 1L
+                                editingSettings.add(
+                                    AiSettings(
+                                        id = newId,
+                                        providerName = "",
+                                        baseUrl = "",
+                                        apiKey = "",
+                                        modelName = "",
+                                        temperature = 0.2,
+                                        enabled = false,
+                                        selectedForVisionWork = false,
+                                        selectedForTextWork = false,
+                                        supportsVision = true,
+                                        verifiedSignature = ""
+                                    )
+                                )
+                                pushSettingsUpdate()
+                                errorText = null
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Text(text = "新增 AI", fontSize = 13.sp)
                         }
-                    }
-
-                    "configs" -> {
-                        Text(text = "配置列表", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF303747))
+                        Text(text = "已配置的 AI", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF303747))
                         if (editingSettings.isEmpty()) {
                             Text(
                                 text = "当前没有 AI 配置。你仍然可以手动记录饮食；真实图片识别和 AI 报告会保持不可用。",
@@ -1655,34 +2122,45 @@ fun AiSettingsDialog(
                             )
                         } else {
                             editingSettings.forEach { item ->
-                                val active = item.id == editingId
                                 Card(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable {
-                                            if (commitCurrentEditingAi()) {
-                                                editingId = item.id
-                                                activeTab = "edit"
-                                                errorText = null
-                                            }
-                                        },
+                                    modifier = Modifier.fillMaxWidth(),
                                     shape = RoundedCornerShape(16.dp),
-                                    colors = CardDefaults.cardColors(containerColor = if (active) Color(0xFFE7F0FF) else Color(0xBFFFFFFF))
+                                    colors = CardDefaults.cardColors(containerColor = Color(0xBFFFFFFF))
                                 ) {
-                                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        Text(text = item.providerName.ifBlank { "未命名 AI" }, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Color(0xFF161A23))
-                                        Text(text = item.modelName.ifBlank { "未填模型" }, fontSize = 12.sp, color = Color(0xFF6F7785))
+                                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Text(
+                                            text = item.providerName.ifBlank { "未命名 AI" },
+                                            fontSize = 15.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFF161A23)
+                                        )
+                                        Text(
+                                            text = item.modelName.ifBlank { "未填模型名称" },
+                                            fontSize = 12.sp,
+                                            color = Color(0xFF6F7785)
+                                        )
                                         Text(
                                             text = listOfNotNull(
+                                                if (item.enabled) "已启用" else "未启用",
                                                 if (item.selectedForVisionWork) "图片工作" else null,
                                                 if (item.selectedForTextWork) "文字工作" else null,
-                                                if (item.enabled) "已启用" else "未启用",
-                                                if (item.supportsVision) "支持图片" else "文本模型",
+                                                when {
+                                                    item.supportsVision -> "支持图片"
+                                                    item.manualVisionConfirmed -> "手动确认图片"
+                                                    else -> "文本模型"
+                                                },
                                                 if (item.apiKey.isNotBlank()) "已填 Key" else "未填 Key"
                                             ).joinToString(" · "),
                                             fontSize = 12.sp,
                                             color = Color(0xFF8A92A1)
                                         )
+                                        OutlinedButton(
+                                            onClick = { openConfig(item.id) },
+                                            modifier = Modifier.fillMaxWidth(),
+                                            shape = RoundedCornerShape(14.dp)
+                                        ) {
+                                            Text(text = "配置", fontSize = 12.sp)
+                                        }
                                     }
                                 }
                             }
@@ -1690,260 +2168,258 @@ fun AiSettingsDialog(
                     }
 
                     else -> {
-                        Text(text = "当前编辑", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF303747))
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(
-                                onClick = {
-                                    if (!commitCurrentEditingAi()) return@OutlinedButton
-                                    val newId = (editingSettings.maxOfOrNull { it.id } ?: 0L) + 1L
-                                    editingSettings.add(
-                                        AiSettings(
-                                            id = newId,
-                                            providerName = providerName.trim().ifBlank { "AI ${editingSettings.size + 1}" },
-                                            baseUrl = normalizeAiBaseUrl(baseUrl) ?: "https://api.openai.com/v1/chat/completions",
-                                            apiKey = apiKey.trim(),
-                                            modelName = modelName.trim().ifBlank { "gpt-4o-mini" },
-                                            temperature = temperature.toDoubleOrNull() ?: 0.2,
-                                            selectedForVisionWork = false,
-                                            selectedForTextWork = false,
-                                            supportsVision = supportsVision
-                                        )
-                                    )
-                                    editingId = newId
-                                    errorText = null
-                                },
-                                modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(14.dp)
+                        val currentAi = editingAi
+                        if (currentAi == null) {
+                            Text(
+                                text = "请先从列表里选择一个 AI 条目进行配置。",
+                                fontSize = 13.sp,
+                                color = Color(0xFF8A92A1)
+                            )
+                        } else {
+                            Text(text = "当前配置", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF303747))
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(16.dp),
+                                colors = CardDefaults.cardColors(containerColor = Color(0xBFFFFFFF))
                             ) {
-                                Text(text = "新增 AI", fontSize = 12.sp)
-                            }
-                            OutlinedButton(
-                                onClick = {
-                                    if (editingId != null) {
-                                        pendingDeleteAiId = editingId
-                                    } else {
-                                        errorText = "当前没有可删除的 AI 配置"
-                                    }
-                                },
-                                modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(14.dp)
-                            ) {
-                                Text(text = "删除当前", fontSize = 12.sp)
-                            }
-                        }
-                        OutlinedButton(
-                            onClick = {
-                                if (enabled) {
-                                    enabled = false
-                                    errorText = null
-                                } else if (currentAiVerified()) {
-                                    enabled = true
-                                    errorText = null
-                                } else {
-                                    errorText = "请先点击“检测当前配置”，检测通过后才能启用这个 AI。"
-                                }
-                            },
-                            enabled = editingId != null,
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(14.dp)
-                        ) {
-                            Text(text = if (enabled) "✓ 已启用真实 AI" else "检测通过后启用真实 AI")
-                        }
-                        OutlinedButton(
-                            onClick = {
-                                if (editingId == null) {
-                                    errorText = "请先新增一个 AI 配置"
-                                    return@OutlinedButton
-                                }
-                                if (!supportsVision) {
-                                    errorText = "该模型被标记为不支持图片，不能作为图片识别工作 AI"
-                                    return@OutlinedButton
-                                }
-                                val selectedCount = editingSettings.count { it.selectedForVisionWork && it.id != editingId } + if (!selectedForVisionWork) 1 else 0
-                                if (!selectedForVisionWork && selectedCount > 3) {
-                                    errorText = "图片识别工作 AI 最多只能选择 3 个"
-                                } else {
-                                    val nextSelectedForVisionWork = !selectedForVisionWork
-                                    selectedForVisionWork = nextSelectedForVisionWork
-                                    if (nextSelectedForVisionWork && !currentAiVerified()) {
-                                        errorText = "已设为图片识别工作 AI；检测通过后才能启用。"
-                                    }
-                                    val index = editingSettings.indexOfFirst { it.id == editingId }
-                                    if (index >= 0) {
-                                        editingSettings[index] = editingSettings[index].copy(
-                                            selectedForVisionWork = nextSelectedForVisionWork
-                                        )
-                                    }
-                                    if (!nextSelectedForVisionWork) errorText = null
-                                }
-                            },
-                            enabled = editingId != null,
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(14.dp)
-                        ) {
-                            Text(text = if (selectedForVisionWork) "✓ 作为图片识别工作 AI" else "作为图片识别工作 AI")
-                        }
-                        OutlinedButton(
-                            onClick = {
-                                if (editingId == null) {
-                                    errorText = "请先新增一个 AI 配置"
-                                    return@OutlinedButton
-                                }
-                                val nextSelectedForTextWork = !selectedForTextWork
-                                selectedForTextWork = nextSelectedForTextWork
-                                if (nextSelectedForTextWork && !currentAiVerified()) {
-                                    errorText = "已设为文字生成工作 AI；检测通过后才能启用。"
-                                }
-                                editingSettings.replaceAll { item ->
-                                    if (item.id == editingId) {
-                                        item.copy(selectedForTextWork = nextSelectedForTextWork)
-                                    } else if (nextSelectedForTextWork) {
-                                        item.copy(selectedForTextWork = false)
-                                    } else {
-                                        item
-                                    }
-                                }
-                                if (!nextSelectedForTextWork) errorText = null
-                            },
-                            enabled = editingId != null,
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(14.dp)
-                        ) {
-                            Text(text = if (selectedForTextWork) "✓ 作为文字生成工作 AI" else "作为文字生成工作 AI")
-                        }
-                        AppTextField(label = "Provider 名称", value = providerName, onValueChange = { providerName = it })
-                        AppTextField(label = "接口地址（/v1 或 /v1/chat/completions）", value = baseUrl, onValueChange = {
-                            baseUrl = it
-                            enabled = false
-                        })
-                        AppTextField(label = "API Key", value = apiKey, onValueChange = {
-                            apiKey = it
-                            enabled = false
-                        })
-                        AppTextField(label = "模型名称", value = modelName, onValueChange = {
-                            modelName = it
-                            enabled = false
-                        })
-                        AppTextField(label = "Temperature", value = temperature, onValueChange = { temperature = it }, isNumber = true)
-                        Text(
-                            text = if (currentAiVerified()) "当前配置已检测通过，可以启用。修改地址、Key 或模型名后需要重新检测。" else "当前配置尚未检测通过；检测成功后才能启用。",
-                            fontSize = 12.sp,
-                            color = if (currentAiVerified()) Color(0xFF2E9D63) else Color(0xFF8A92A1)
-                        )
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(
-                                onClick = {
-                                    if (!commitCurrentEditingAi()) return@OutlinedButton
-                                    val currentSettings = editingSettings.firstOrNull { it.id == editingId } ?: return@OutlinedButton
-                                    isTestingAi = true
-                                    errorText = "正在检测当前 AI 配置..."
-                                    coroutineScope.launch {
-                                        val result = runCatching { testAiSettings(currentSettings) }
-                                        isTestingAi = false
-                                        result.onSuccess {
-                                            val signature = aiVerificationSignature(currentSettings.providerName, currentSettings.baseUrl, currentSettings.apiKey, currentSettings.modelName)
-                                            val index = editingSettings.indexOfFirst { it.id == currentSettings.id }
-                                            if (index >= 0) {
-                                                editingSettings[index] = editingSettings[index].copy(verifiedSignature = signature)
-                                            }
-                                            errorText = "检测通过：${currentSettings.modelName} 可以正常响应。现在可以启用。"
-                                        }.onFailure { error ->
-                                            val index = editingSettings.indexOfFirst { it.id == currentSettings.id }
-                                            if (index >= 0) {
-                                                editingSettings[index] = editingSettings[index].copy(enabled = false, verifiedSignature = "")
-                                            }
-                                            enabled = false
-                                            errorText = "检测失败：${friendlyAiReportErrorMessage(error)}"
+                                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = currentAi.providerName.ifBlank { "未命名 AI" },
+                                                fontSize = 15.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFF161A23)
+                                            )
+                                            Text(
+                                                text = currentAi.modelName.ifBlank { "未填模型名称" },
+                                                fontSize = 12.sp,
+                                                color = Color(0xFF8A92A1)
+                                            )
                                         }
                                     }
-                                },
-                                enabled = editingId != null && !isTestingAi,
-                                modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(14.dp)
-                            ) {
-                                Text(text = if (isTestingAi) "检测中..." else "检测当前配置", fontSize = 12.sp)
-                            }
-                            OutlinedButton(
-                                onClick = {
-                                    if (!commitCurrentEditingAi()) return@OutlinedButton
-                                    val currentSettings = editingSettings.firstOrNull { it.id == editingId } ?: return@OutlinedButton
-                                    isFetchingModels = true
-                                    fetchedModels = emptyList()
-                                    errorText = "正在获取模型列表..."
-                                    coroutineScope.launch {
-                                        val result = runCatching { fetchAiModelList(currentSettings) }
-                                        isFetchingModels = false
-                                        result.onSuccess { models ->
-                                            fetchedModels = models
-                                            errorText = if (models.isEmpty()) "接口可访问，但没有解析到模型列表。" else "已获取 ${models.size} 个模型，点击下方模型名即可填入。"
-                                        }.onFailure { error ->
-                                            errorText = "获取模型列表失败：${friendlyAiReportErrorMessage(error)}"
+                                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        OutlinedButton(
+                                            onClick = { showPresetPickerDialog = true },
+                                            modifier = Modifier.weight(1f),
+                                            shape = RoundedCornerShape(14.dp)
+                                        ) {
+                                            Text(text = "应用预设", fontSize = 12.sp)
+                                        }
+                                        OutlinedButton(
+                                            onClick = {
+                                                val currentSettings = buildSettingsForModelListFetch() ?: return@OutlinedButton
+                                                isFetchingModels = true
+                                                errorText = "正在获取模型列表..."
+                                                coroutineScope.launch {
+                                                    val result = runCatching { fetchAiModelList(currentSettings) }
+                                                    isFetchingModels = false
+                                                    result.onSuccess { models ->
+                                                        fetchedModels = models
+                                                        showModelPickerDialog = true
+                                                        errorText = if (models.isEmpty()) "接口可访问，但没有解析到模型列表。" else null
+                                                    }.onFailure { error ->
+                                                        errorText = "获取模型列表失败：${friendlyAiReportErrorMessage(error)}"
+                                                    }
+                                                }
+                                            },
+                                            modifier = Modifier.weight(1f),
+                                            enabled = !isFetchingModels,
+                                            shape = RoundedCornerShape(14.dp)
+                                        ) {
+                                            Text(text = if (isFetchingModels) "获取模型中..." else "选择模型", fontSize = 12.sp)
                                         }
                                     }
-                                },
-                                enabled = editingId != null && !isFetchingModels,
-                                modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(14.dp)
-                            ) {
-                                Text(text = if (isFetchingModels) "获取中..." else "获取模型列表", fontSize = 12.sp)
+                                    AppTextField(label = "Provider 名称", value = providerName, onValueChange = {
+                                        providerName = it
+                                        enabled = false
+                                    })
+                                    AppTextField(label = "接口地址（/v1 或 /v1/chat/completions）", value = baseUrl, onValueChange = {
+                                        baseUrl = it
+                                        enabled = false
+                                    })
+                                    AppTextField(label = "API Key", value = apiKey, onValueChange = {
+                                        apiKey = it
+                                        enabled = false
+                                    })
+                                    AppTextField(label = "模型名称", value = modelName, onValueChange = {
+                                        modelName = it
+                                        enabled = false
+                                    })
+                                    AppTextField(label = "Temperature", value = temperature, onValueChange = { temperature = it }, isNumber = true)
+                                }
                             }
-                        }
-                        if (fetchedModels.isNotEmpty()) {
-                            Text(text = "接口返回的模型", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF303747))
-                            fetchedModels.take(40).forEach { fetchedModel ->
+
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 OutlinedButton(
                                     onClick = {
-                                        modelName = fetchedModel
-                                        supportsVision = modelNameLooksVisionCapable(fetchedModel)
-                                        if (!supportsVision) selectedForVisionWork = false
-                                        enabled = false
-                                        errorText = "已选择 $fetchedModel，请检测通过后启用。"
+                                        if (enabled) {
+                                            enabled = false
+                                            errorText = null
+                                        } else if (currentAiVerified()) {
+                                            enabled = true
+                                            errorText = null
+                                        } else {
+                                            errorText = "请先点击“检测当前配置”；通过后才能启用。"
+                                        }
                                     },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    shape = RoundedCornerShape(12.dp)
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(14.dp)
                                 ) {
-                                    Text(text = fetchedModel, fontSize = 12.sp)
+                                    Text(
+                                        text = when {
+                                            enabled -> "停用此配置"
+                                            currentAiVerified() -> "启用此配置"
+                                            else -> "未检测，暂不能启用"
+                                        },
+                                        fontSize = 12.sp
+                                    )
+                                }
+                                OutlinedButton(
+                                    onClick = { pendingDeleteAiId = currentAi.id },
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(14.dp)
+                                ) {
+                                    Text(text = "删除", fontSize = 12.sp)
                                 }
                             }
-                        }
-                        OutlinedButton(
-                            onClick = {
-                                val nextSupportsVision = !supportsVision
-                                supportsVision = nextSupportsVision
-                                if (!nextSupportsVision) selectedForVisionWork = false
-                                enabled = false
-                            },
-                            enabled = editingId != null,
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(14.dp)
-                        ) {
-                            Text(text = if (supportsVision) "✓ 支持图片识别" else "不支持图片识别")
-                        }
-                        OutlinedButton(
-                            onClick = {
-                                if (editingId == null) {
-                                    errorText = "请先新增一个 AI 配置"
-                                    return@OutlinedButton
+
+                            OutlinedButton(
+                                onClick = {
+                                    if (editingId == null) {
+                                        errorText = "当前没有可配置的 AI 条目"
+                                        return@OutlinedButton
+                                    }
+                                    if (!currentAiVerified()) {
+                                        errorText = "请先检测当前配置，系统会在检测通过时自动询问该模型是否支持图片识别。"
+                                        return@OutlinedButton
+                                    }
+                                    if (!supportsVision) {
+                                        errorText = "该模型已检测为不支持图片识别，不能作为图片识别工作 AI"
+                                        return@OutlinedButton
+                                    }
+                                    val selectedCount = editingSettings.count { it.selectedForVisionWork && it.id != editingId } + if (!selectedForVisionWork) 1 else 0
+                                    if (!selectedForVisionWork && selectedCount > 3) {
+                                        errorText = "图片识别工作 AI 最多只能选择 3 个"
+                                    } else {
+                                        val nextSelectedForVisionWork = !selectedForVisionWork
+                                        selectedForVisionWork = nextSelectedForVisionWork
+                                        val index = editingSettings.indexOfFirst { it.id == editingId }
+                                        if (index >= 0) {
+                                            editingSettings[index] = editingSettings[index].copy(selectedForVisionWork = nextSelectedForVisionWork)
+                                            if (nextSelectedForVisionWork) {
+                                                probeVisionUploadFormat(editingSettings[index], announceSelection = true)
+                                            }
+                                        }
+                                        if (!nextSelectedForVisionWork) errorText = null
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(14.dp)
+                            ) {
+                                Text(text = if (selectedForVisionWork) "✓ 已选为图片识别工作 AI" else "选为图片识别工作 AI")
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    if (editingId == null) {
+                                        errorText = "当前没有可配置的 AI 条目"
+                                        return@OutlinedButton
+                                    }
+                                    val nextSelectedForTextWork = !selectedForTextWork
+                                    selectedForTextWork = nextSelectedForTextWork
+                                    if (nextSelectedForTextWork && !currentAiVerified()) {
+                                        errorText = "已选为文字生成工作 AI；还需要检测并启用此 AI 配置后才会参与工作。"
+                                    }
+                                    editingSettings.replaceAll { item ->
+                                        if (item.id == editingId) {
+                                            item.copy(selectedForTextWork = nextSelectedForTextWork)
+                                        } else if (nextSelectedForTextWork) {
+                                            item.copy(selectedForTextWork = false)
+                                        } else {
+                                            item
+                                        }
+                                    }
+                                    if (!nextSelectedForTextWork) errorText = null
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(14.dp)
+                            ) {
+                                Text(text = if (selectedForTextWork) "✓ 已选为文字生成工作 AI" else "选为文字生成工作 AI")
+                            }
+
+                            Text(
+                                text = if (currentAiVerified()) "检测状态：已通过。现在可以启用此 AI 配置。修改地址、Key 或模型名后需要重新检测。" else "检测状态：未通过或未检测。请先点击“检测当前配置”。",
+                                fontSize = 12.sp,
+                                color = if (currentAiVerified()) Color(0xFF2E9D63) else Color(0xFF8A92A1)
+                            )
+                            Text(
+                                text = if (currentAiVerified()) {
+                                    if (supportsVision) "图片能力：已自动确认支持图片识别。" else "图片能力：已自动确认不支持图片识别。"
+                                } else {
+                                    "图片能力：待检测；检测通过后会自动询问模型是否支持图片识别。"
+                                },
+                                fontSize = 12.sp,
+                                color = if (currentAiVerified() && supportsVision) Color(0xFF2E9D63) else Color(0xFF8A92A1)
+                            )
+
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedButton(
+                                    onClick = {
+                                        if (!commitCurrentEditingAi()) return@OutlinedButton
+                                        val currentSettings = editingSettings.firstOrNull { it.id == editingId } ?: return@OutlinedButton
+                                        isTestingAi = true
+                                        errorText = "正在检测当前 AI 配置..."
+                                        coroutineScope.launch {
+                                            val result = runCatching { verifyAiSettings(currentSettings) }
+                                            isTestingAi = false
+                                            result.onSuccess { verification ->
+                                                supportsVision = verification.supportsVision
+                                                if (!verification.supportsVision) {
+                                                    selectedForVisionWork = false
+                                                }
+                                                val signature = aiVerificationSignature(currentSettings.providerName, currentSettings.baseUrl, currentSettings.apiKey, currentSettings.modelName)
+                                                val index = editingSettings.indexOfFirst { it.id == currentSettings.id }
+                                                if (index >= 0) {
+                                                    editingSettings[index] = editingSettings[index].copy(
+                                                        verifiedSignature = signature,
+                                                        supportsVision = verification.supportsVision,
+                                                        visionImageUploadFormat = verification.visionImageUploadFormat,
+                                                        selectedForVisionWork = editingSettings[index].selectedForVisionWork && verification.supportsVision
+                                                    )
+                                                }
+                                                errorText = "检测通过：${currentSettings.modelName} 可以正常响应，且已自动询问图片能力，结果为${if (verification.supportsVision) "支持图片识别" else "不支持图片识别"}。"
+                                            }.onFailure { error ->
+                                                val index = editingSettings.indexOfFirst { it.id == currentSettings.id }
+                                                if (index >= 0) {
+                                                    editingSettings[index] = editingSettings[index].copy(enabled = false, verifiedSignature = "")
+                                                }
+                                                enabled = false
+                                                errorText = "检测失败：${friendlyAiReportErrorMessage(error)}"
+                                            }
+                                        }
+                                    },
+                                    enabled = !isTestingAi,
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(14.dp)
+                                ) {
+                                    Text(text = if (isTestingAi) "检测中..." else "检测当前配置", fontSize = 12.sp)
                                 }
-                                supportsVision = modelNameLooksVisionCapable(modelName)
-                                if (!supportsVision) selectedForVisionWork = false
-                                errorText = if (supportsVision) "已根据模型名判断为支持图片" else "已根据模型名判断为文本模型"
-                            },
-                            enabled = editingId != null,
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(14.dp)
-                        ) {
-                            Text(text = "按模型名自动判断图片能力", fontSize = 12.sp)
-                        }
-                        OutlinedButton(
-                            onClick = {
-                                if (commitCurrentEditingAi()) errorText = "当前 AI 配置已更新"
-                            },
-                            enabled = editingId != null,
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(14.dp)
-                        ) {
-                            Text(text = "更新当前 AI 配置", fontSize = 12.sp)
+                                OutlinedButton(
+                                    onClick = {
+                                        if (commitCurrentEditingAi()) {
+                                            errorText = "当前 AI 配置已更新"
+                                        }
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(14.dp)
+                                ) {
+                                    Text(text = "更新当前配置", fontSize = 12.sp)
+                                }
+                            }
                         }
                     }
                 }
@@ -1951,30 +2427,288 @@ fun AiSettingsDialog(
             }
         },
         confirmButton = {
-            Button(
-                onClick = {
-                    if (!commitCurrentEditingAi()) return@Button
-                    if (editingSettings.count { it.selectedForVisionWork } > 3) {
-                        errorText = "图片识别工作 AI 最多只能选择 3 个"
-                        return@Button
-                    }
-                    if (editingSettings.count { it.selectedForTextWork } > 1) {
-                        errorText = "文字生成工作 AI 只能选择 1 个"
-                        return@Button
-                    }
-                    onSave(editingSettings.toList())
-                },
-                shape = RoundedCornerShape(14.dp)
-            ) {
-                Text(text = "保存全部")
+            Button(onClick = onDismiss, shape = RoundedCornerShape(14.dp)) {
+                Text(text = "关闭")
             }
         },
-        dismissButton = {
-            OutlinedButton(onClick = onDismiss, shape = RoundedCornerShape(14.dp)) {
-                Text(text = "取消")
-            }
-        }
+        dismissButton = {}
     )
+
+    editingAi?.let { currentAi ->
+        AlertDialog(
+            onDismissRequest = { editingId = null },
+            title = { Text(text = "配置 AI", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(text = "当前配置", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF303747))
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xBFFFFFFF))
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = currentAi.providerName.ifBlank { "未命名 AI" },
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF161A23)
+                                    )
+                                    Text(
+                                        text = currentAi.modelName.ifBlank { "未填模型名称" },
+                                        fontSize = 12.sp,
+                                        color = Color(0xFF8A92A1)
+                                    )
+                                }
+                            }
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedButton(
+                                    onClick = { showPresetPickerDialog = true },
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(14.dp)
+                                ) {
+                                    Text(text = "应用预设", fontSize = 12.sp)
+                                }
+                                OutlinedButton(
+                                    onClick = { pendingDeleteAiId = currentAi.id },
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(14.dp)
+                                ) {
+                                    Text(text = "删除", fontSize = 12.sp)
+                                }
+                            }
+                            AppTextField(label = "Provider 名称", value = providerName, onValueChange = {
+                                providerName = it
+                                enabled = false
+                                syncCurrentEditingAi()
+                            })
+                            AppTextField(label = "接口地址（v1 或 /v1/chat/completions）", value = baseUrl, onValueChange = {
+                                baseUrl = it
+                                enabled = false
+                                syncCurrentEditingAi()
+                            })
+                            AppTextField(label = "API Key", value = apiKey, onValueChange = {
+                                apiKey = it
+                                enabled = false
+                                syncCurrentEditingAi()
+                            })
+                            AppTextField(label = "模型名称", value = modelName, onValueChange = {
+                                modelName = it
+                                enabled = false
+                                syncCurrentEditingAi()
+                            })
+                            AppTextField(label = "Temperature", value = temperature, onValueChange = {
+                                temperature = it
+                                syncCurrentEditingAi()
+                            }, isNumber = true)
+                        }
+                    }
+
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = {
+                                if (enabled) {
+                                    enabled = false
+                                    syncCurrentEditingAi()
+                                    errorText = null
+                                } else if (currentAiVerified()) {
+                                    enabled = true
+                                    syncCurrentEditingAi()
+                                    errorText = null
+                                } else {
+                                    errorText = "请先点击“检测当前配置”；通过后才能启用。"
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Text(
+                                text = when {
+                                    enabled -> "停用此配置"
+                                    currentAiVerified() -> "启用此配置"
+                                    else -> "未检测，暂不能启用"
+                                },
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            val currentSettings = buildSettingsForModelListFetch() ?: return@OutlinedButton
+                            isFetchingModels = true
+                            errorText = "正在获取模型列表..."
+                            coroutineScope.launch {
+                                val result = runCatching { fetchAiModelList(currentSettings) }
+                                isFetchingModels = false
+                                result.onSuccess { models ->
+                                    fetchedModels = models
+                                    showModelPickerDialog = true
+                                    errorText = if (models.isEmpty()) "接口可访问，但没有解析到模型列表。" else null
+                                }.onFailure { error ->
+                                    errorText = "获取模型列表失败：${friendlyAiReportErrorMessage(error)}"
+                                }
+                            }
+                        },
+                        enabled = !isFetchingModels,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Text(text = if (isFetchingModels) "获取模型中..." else "根据API Key获取模型列表", fontSize = 12.sp)
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            manualVisionConfirmed = !manualVisionConfirmed
+                            if (!manualVisionConfirmed && !supportsVision) {
+                                selectedForVisionWork = false
+                            }
+                            syncCurrentEditingAi()
+                            errorText = if (manualVisionConfirmed) "已手动确认该模型能够识别图像。" else null
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Text(text = if (manualVisionConfirmed) "✓ 我确认该模型能够识别图像" else "我确认该模型能够识别图像", fontSize = 12.sp)
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            if (editingId == null) {
+                                errorText = "当前没有可配置的 AI 条目"
+                                return@OutlinedButton
+                            }
+                            if (!(supportsVision || manualVisionConfirmed)) {
+                                errorText = "请先检测当前配置，系统会在检测通过时自动询问该模型是否支持图片识别。"
+                                return@OutlinedButton
+                            }
+                            if (!supportsVision && !manualVisionConfirmed) {
+                                errorText = "该模型已检测为不支持图片识别，不能作为图片识别工作 AI"
+                                return@OutlinedButton
+                            }
+                            val selectedCount = editingSettings.count { it.selectedForVisionWork && it.id != editingId } + if (!selectedForVisionWork) 1 else 0
+                            if (!selectedForVisionWork && selectedCount > 3) {
+                                errorText = "图片识别工作 AI 最多只能选择 3 个"
+                            } else {
+                                selectedForVisionWork = !selectedForVisionWork
+                                syncCurrentEditingAi()
+                                if (selectedForVisionWork) {
+                                    editingSettings.firstOrNull { it.id == editingId }?.let { latestSettings ->
+                                        probeVisionUploadFormat(latestSettings, announceSelection = true)
+                                    }
+                                }
+                                if (selectedForVisionWork && !currentAiVerified()) {
+                                    errorText = "已选为图片识别工作 AI；还需要检测并启用此 AI 配置后才会参与工作。"
+                                } else if (!selectedForVisionWork) {
+                                    errorText = null
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Text(text = if (selectedForVisionWork) "✓ 已选为图片识别工作 AI" else "选为图片识别工作 AI")
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            if (editingId == null) {
+                                errorText = "当前没有可配置的 AI 条目"
+                                return@OutlinedButton
+                            }
+                            val nextSelectedForTextWork = !selectedForTextWork
+                            selectedForTextWork = nextSelectedForTextWork
+                            if (nextSelectedForTextWork && !currentAiVerified()) {
+                                errorText = "已选为文字生成工作 AI；还需要检测并启用此 AI 配置后才会参与工作。"
+                            }
+                            editingSettings.replaceAll { item ->
+                                if (item.id == editingId) {
+                                    item.copy(selectedForTextWork = nextSelectedForTextWork)
+                                } else if (nextSelectedForTextWork) {
+                                    item.copy(selectedForTextWork = false)
+                                } else {
+                                    item
+                                }
+                            }
+                            pushSettingsUpdate()
+                            if (!nextSelectedForTextWork) errorText = null
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Text(text = if (selectedForTextWork) "✓ 已选为文字生成工作 AI" else "选为文字生成工作 AI")
+                    }
+
+                    Text(
+                        text = if (currentAiVerified()) "检测状态：已通过。现在可以启用此 AI 配置。修改地址、Key 或模型名后需要重新检测。" else "检测状态：未通过或未检测。请先点击“检测当前配置”。",
+                        fontSize = 12.sp,
+                        color = if (currentAiVerified()) Color(0xFF2E9D63) else Color(0xFF8A92A1)
+                    )
+                    Text(
+                        text = if (currentAiVerified()) {
+                            if (supportsVision) "图片能力：已自动确认支持图片识别。" else "图片能力：已自动确认不支持图片识别。"
+                        } else {
+                            "图片能力：待检测；检测通过后会自动询问模型是否支持图片识别。"
+                        },
+                        fontSize = 12.sp,
+                        color = if (supportsVision || manualVisionConfirmed) Color(0xFF2E9D63) else Color(0xFF8A92A1)
+                    )
+
+                    OutlinedButton(
+                        onClick = {
+                            if (!commitCurrentEditingAi()) return@OutlinedButton
+                            val currentSettings = editingSettings.firstOrNull { it.id == editingId } ?: return@OutlinedButton
+                            isTestingAi = true
+                            errorText = "正在检测当前 AI 配置..."
+                            coroutineScope.launch {
+                                val result = runCatching { verifyAiSettings(currentSettings) }
+                                isTestingAi = false
+                                result.onSuccess { verification ->
+                                    supportsVision = verification.supportsVision
+                                    if (!verification.supportsVision && !manualVisionConfirmed) {
+                                        selectedForVisionWork = false
+                                    }
+                                    val signature = aiVerificationSignature(currentSettings.providerName, currentSettings.baseUrl, currentSettings.apiKey, currentSettings.modelName)
+                                    replaceEditingSetting(
+                                        currentSettings.copy(
+                                            verifiedSignature = signature,
+                                            supportsVision = verification.supportsVision,
+                                            manualVisionConfirmed = manualVisionConfirmed,
+                                            visionImageUploadFormat = verification.visionImageUploadFormat,
+                                            selectedForVisionWork = currentSettings.selectedForVisionWork && (verification.supportsVision || manualVisionConfirmed)
+                                        )
+                                    )
+                                    errorText = "检测通过：${currentSettings.modelName} 可以正常响应，且已自动询问图片能力，结果为 ${if (verification.supportsVision) "支持图片识别" else "不支持图片识别"}。"
+                                }.onFailure { error ->
+                                    replaceEditingSetting(currentSettings.copy(enabled = false, verifiedSignature = ""))
+                                    enabled = false
+                                    errorText = "检测失败：${friendlyAiReportErrorMessage(error)}"
+                                }
+                            }
+                        },
+                        enabled = !isTestingAi,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Text(text = if (isTestingAi) "检测中..." else "检测当前配置", fontSize = 12.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = { editingId = null }, shape = RoundedCornerShape(14.dp)) {
+                    Text(text = "完成")
+                }
+            },
+            dismissButton = {}
+        )
+    }
 
     val deleteTarget = editingSettings.firstOrNull { it.id == pendingDeleteAiId }
     if (deleteTarget != null) {
@@ -1985,13 +2719,174 @@ fun AiSettingsDialog(
             onConfirm = {
                 editingSettings.removeAll { it.id == deleteTarget.id }
                 if (editingId == deleteTarget.id) {
-                    editingId = editingSettings.firstOrNull()?.id
+                    editingId = null
+                    viewMode = "list"
                 }
+                pushSettingsUpdate()
                 pendingDeleteAiId = null
                 errorText = null
             },
             onDismiss = {
                 pendingDeleteAiId = null
+            }
+        )
+    }
+
+    if (showPresetPickerDialog) {
+        AlertDialog(
+            onDismissRequest = { showPresetPickerDialog = false },
+            title = { Text(text = "应用预设", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(text = "按公司选择预设", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF303747))
+                    defaultAiPresetSections().forEach { section ->
+                        val sectionExpanded = expandedPresetSection == section.sectionName
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(containerColor = Color(0xBFFFFFFF))
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            expandedPresetSection = if (sectionExpanded) null else section.sectionName
+                                            if (!sectionExpanded) expandedPresetCompany = null
+                                        },
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(text = section.sectionName, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Color(0xFF161A23))
+                                        Text(
+                                            text = "${section.groups.size} 家公司 · ${section.groups.sumOf { it.presets.size }} 个模型",
+                                            fontSize = 12.sp,
+                                            color = Color(0xFF8A92A1)
+                                        )
+                                    }
+                                    Text(text = if (sectionExpanded) "收起" else "展开", fontSize = 12.sp, color = Color(0xFF5B8DEF), fontWeight = FontWeight.SemiBold)
+                                }
+                                if (sectionExpanded) {
+                                    section.groups.forEach { group ->
+                                        val companyKey = "${section.sectionName}/${group.companyName}"
+                                        val companyExpanded = expandedPresetCompany == companyKey
+                                        Card(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            shape = RoundedCornerShape(12.dp),
+                                            colors = CardDefaults.cardColors(containerColor = Color(0x66FFFFFF))
+                                        ) {
+                                            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                                                Row(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .clickable {
+                                                            expandedPresetCompany = if (companyExpanded) null else companyKey
+                                                        },
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Column(modifier = Modifier.weight(1f)) {
+                                                        Text(text = group.companyName, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF303747))
+                                                        Text(text = "${group.presets.size} 个模型 · ${group.presets.count { it.supportsVision }} 个支持图片", fontSize = 11.sp, color = Color(0xFF8A92A1))
+                                                    }
+                                                    Text(text = if (companyExpanded) "收起" else "展开", fontSize = 11.sp, color = Color(0xFF5B8DEF), fontWeight = FontWeight.SemiBold)
+                                                }
+                                                if (companyExpanded) {
+                                                    group.presets.forEach { preset ->
+                                                        OutlinedButton(
+                                                            onClick = {
+                                                                providerName = preset.providerName
+                                                                baseUrl = preset.baseUrl
+                                                                modelName = preset.modelName
+                                                                temperature = preset.temperature.toString()
+                                                                supportsVision = preset.supportsVision
+                                                                enabled = false
+                                                                syncCurrentEditingAi()
+                                                                errorText = "已应用 ${preset.modelName} 预设，请填写 API Key 后检测。"
+                                                                showPresetPickerDialog = false
+                                                            },
+                                                            modifier = Modifier.fillMaxWidth(),
+                                                            shape = RoundedCornerShape(12.dp)
+                                                        ) {
+                                                            Text(text = "${preset.modelName} · ${if (preset.supportsVision) "支持图片" else "文本模型"}", fontSize = 12.sp)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = { showPresetPickerDialog = false }, shape = RoundedCornerShape(14.dp)) {
+                    Text(text = "关闭")
+                }
+            }
+        )
+    }
+
+    if (showModelPickerDialog) {
+        AlertDialog(
+            onDismissRequest = { showModelPickerDialog = false },
+            title = { Text(text = "选择模型", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    if (fetchedModels.isEmpty()) {
+                        Text(text = "当前没有可选模型，请先检查接口地址和 API Key。", fontSize = 13.sp, color = Color(0xFF8A92A1))
+                    } else {
+                        fetchedModels.take(60).forEach { fetchedModel ->
+                            OutlinedButton(
+                                onClick = {
+                                    modelName = fetchedModel
+                                    enabled = false
+                                    syncCurrentEditingAi()
+                                    errorText = "已选择 $fetchedModel，请先检测当前配置；检测通过后会自动确认是否支持图片识别。"
+                                    showModelPickerDialog = false
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text(text = fetchedModel, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = { showModelPickerDialog = false }, shape = RoundedCornerShape(14.dp)) {
+                    Text(text = "关闭")
+                }
+            }
+        )
+    }
+
+    if (showAiHelpDialog) {
+        AlertDialog(
+            onDismissRequest = { showAiHelpDialog = false },
+            title = { Text(text = "怎么设置 AI？", fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    text = "你需要先新增 AI，然后可以选择一个预设，然后填入服务商地址、API Key、模型名称，当然你也可以检测模型名称然后自动填入。不知道怎么搞这些？快去请教你擅长计算机的朋友吧！是时候和朋友们增进情感了！",
+                    fontSize = 14.sp,
+                    color = Color(0xFF303747)
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = { showAiHelpDialog = false },
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Text(text = "我知道了")
+                }
             }
         )
     }
@@ -2169,7 +3064,7 @@ fun AiMealAnalysisDialog(
             settings.apiKey.isNotBlank() &&
             settings.baseUrl.isNotBlank() &&
             if (imageDataUrl != null) {
-                settings.selectedForVisionWork && settings.supportsVision
+                settings.selectedForVisionWork && settings.canHandleVisionTasks()
             } else {
                 settings.selectedForTextWork
             }
@@ -2182,7 +3077,7 @@ fun AiMealAnalysisDialog(
             settings.baseUrl.isNotBlank()
     }
     val skippedVisionModels = if (imageDataUrl != null) {
-        aiSettingsList.filter { it.enabled && it.selectedForVisionWork && !it.supportsVision }
+        aiSettingsList.filter { it.enabled && it.selectedForVisionWork && !it.canHandleVisionTasks() }
     } else {
         emptyList()
     }
@@ -2245,29 +3140,37 @@ fun AiMealAnalysisDialog(
                     aiErrorText = errors.take(2).joinToString("\n") { friendlyAiErrorMessage(it) }
                 }
                 aiCandidates = if (successfulCandidates.isNotEmpty()) {
-                    val summaryCandidate = if (successfulCandidates.size >= 2 && textSummaryAiSettings != null) {
-                        runCatching {
-                            requestAiCandidateSummary(
-                                settings = textSummaryAiSettings,
-                                candidates = successfulCandidates,
-                                fallbackName = foodName,
-                                foodDescription = foodDescription,
-                                fallbackServingType = servingType
-                            )
-                        }.getOrElse { error ->
-                            aiErrorText = listOfNotNull(aiErrorText, "文字生成工作 AI 汇总失败：${friendlyAiReportErrorMessage(error)}").joinToString("\n")
+                    if (imageType == RecognitionImageType.NutritionLabel) {
+                        val bestCandidate = selectBestRecognizedFoodCandidate(
+                            candidates = successfulCandidates,
+                            fallbackName = foodName.ifBlank { "营养成分表食品" }
+                        )
+                        listOf(bestCandidate) + successfulCandidates
+                    } else {
+                        val summaryCandidate = if (successfulCandidates.size >= 2 && textSummaryAiSettings != null) {
+                            runCatching {
+                                requestAiCandidateSummary(
+                                    settings = textSummaryAiSettings,
+                                    candidates = successfulCandidates,
+                                    fallbackName = foodName,
+                                    foodDescription = foodDescription,
+                                    fallbackServingType = servingType
+                                )
+                            }.getOrElse { error ->
+                                aiErrorText = listOfNotNull(aiErrorText, "文字生成工作 AI 汇总失败：${friendlyAiReportErrorMessage(error)}").joinToString("\n")
+                                averageRecognizedFoodCandidate(successfulCandidates)
+                            }
+                        } else {
                             averageRecognizedFoodCandidate(successfulCandidates)
                         }
-                    } else {
-                        averageRecognizedFoodCandidate(successfulCandidates)
+                        successfulCandidates + summaryCandidate
                     }
-                    successfulCandidates + summaryCandidate
                 } else {
                     aiErrorText = errors.firstOrNull()?.let(::friendlyAiErrorMessage) ?: "工作 AI 未返回可用结果，已切换为本地候选结果。"
                     if (imageDataUrl != null) {
                         mockImageRecognitionCandidates(foodName)
                     } else {
-                        mockRecognizedFoodCandidates(foodName, servingType, proteinText.toIntOrNull() ?: 0, fatText.toIntOrNull() ?: 0, carbsText.toIntOrNull() ?: 0)
+                        mockRecognizedFoodCandidates(foodName, servingType, parseOneDecimal(proteinText) ?: 0.0, parseOneDecimal(fatText) ?: 0.0, parseOneDecimal(carbsText) ?: 0.0)
                     }
                 }
             } else {
@@ -2278,16 +3181,16 @@ fun AiMealAnalysisDialog(
                 aiCandidates = if (imageDataUrl != null) {
                     mockImageRecognitionCandidates(foodName)
                 } else {
-                    mockRecognizedFoodCandidates(foodName, servingType, proteinText.toIntOrNull() ?: 0, fatText.toIntOrNull() ?: 0, carbsText.toIntOrNull() ?: 0)
+                    mockRecognizedFoodCandidates(foodName, servingType, parseOneDecimal(proteinText) ?: 0.0, parseOneDecimal(fatText) ?: 0.0, parseOneDecimal(carbsText) ?: 0.0)
                 }
             }
             isAnalyzing = false
         }
     }
 
-    val carbs = carbsText.toIntOrNull() ?: 0
-    val protein = proteinText.toIntOrNull() ?: 0
-    val fat = fatText.toIntOrNull() ?: 0
+    val carbs = parseOneDecimal(carbsText) ?: 0.0
+    val protein = parseOneDecimal(proteinText) ?: 0.0
+    val fat = parseOneDecimal(fatText) ?: 0.0
     val calories = calculateCalories(protein, fat, carbs)
     val category = suggestFoodCategory(foodName)
     val tags = suggestMealTags(foodName, calories, protein, fat, carbs)
@@ -2296,7 +3199,7 @@ fun AiMealAnalysisDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(text = "AI 分析此记录", fontWeight = FontWeight.Bold) },
+        title = { Text(text = if (imageDataUrl == null) "通过文字描述分析食物" else "AI 图片识别食物", fontWeight = FontWeight.Bold) },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -2334,7 +3237,15 @@ fun AiMealAnalysisDialog(
                 }
                 Text(
                     text = if (workingAiSettings.isNotEmpty()) {
-                        "本次将并行调用 ${workingAiSettings.size} 个图片识别工作 AI，并${if (textSummaryAiSettings != null) "由文字生成工作 AI 汇总 1 个结果" else "生成 1 个本地平均值结果"}。" +
+                        "本次将并行调用 ${workingAiSettings.size} 个图片识别工作 AI，并${
+                            if (imageType == RecognitionImageType.NutritionLabel) {
+                                "自动优先选择最像直接读取营养成分表的结果"
+                            } else if (textSummaryAiSettings != null) {
+                                "由文字生成工作 AI 汇总 1 个结果"
+                            } else {
+                                "生成 1 个本地平均值结果"
+                            }
+                        }。" +
                             if (skippedVisionModels.isNotEmpty()) " 已跳过 ${skippedVisionModels.size} 个不支持图片的文本模型。" else ""
                     } else {
                         "当前没有可用工作 AI，将使用本地规则候选。"
@@ -2364,6 +3275,11 @@ fun AiMealAnalysisDialog(
                 if (recognizedCandidates.isNotEmpty()) {
                     Text(text = "候选识别结果", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color(0xFF161A23))
                     recognizedCandidates.forEach { candidate ->
+                        val suggestedServingCount = servingCountFromQuantity(candidate.quantity, candidate.food.servingType)
+                        val suggestedTotalProtein = roundOneDecimal(candidate.food.protein * suggestedServingCount)
+                        val suggestedTotalFat = roundOneDecimal(candidate.food.fat * suggestedServingCount)
+                        val suggestedTotalCarbs = roundOneDecimal(candidate.food.carbs * suggestedServingCount)
+                        val suggestedTotalCalories = calculateCalories(suggestedTotalProtein, suggestedTotalFat, suggestedTotalCarbs)
                         Card(
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(16.dp),
@@ -2373,9 +3289,19 @@ fun AiMealAnalysisDialog(
                                 Text(text = candidate.food.name, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF161A23))
                                 Text(text = candidate.sourceName, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF5B8DEF))
                                 Text(
-                                    text = "${candidate.food.category} · ${candidate.food.calories} kcal/${foodServingText(candidate.food)} · 建议 ${formatServingCount(candidate.quantity)}${if (candidate.food.servingType == ServingType.PerItem) "个" else "g"}",
+                                    text = "${candidate.food.category} · ${formatNumber(candidate.food.calories)} kcal/${foodServingText(candidate.food)} · 建议 ${formatServingCount(candidate.quantity)}${quantityUnitText(candidate.food.servingType, candidate.food.unitLabel)}",
                                     fontSize = 12.sp,
                                     color = Color(0xFF6F7785)
+                                )
+                                Text(
+                                    text = "${foodServingText(candidate.food)}：碳水${formatNumber(candidate.food.carbs)}g · 蛋白${formatNumber(candidate.food.protein)}g · 脂肪${formatNumber(candidate.food.fat)}g",
+                                    fontSize = 12.sp,
+                                    color = Color(0xFF303747)
+                                )
+                                Text(
+                                    text = "按建议份量约：${formatNumber(suggestedTotalCalories)} kcal · 碳水${formatNumber(suggestedTotalCarbs)}g · 蛋白${formatNumber(suggestedTotalProtein)}g · 脂肪${formatNumber(suggestedTotalFat)}g",
+                                    fontSize = 12.sp,
+                                    color = Color(0xFF5B8DEF)
                                 )
                                 Text(text = "置信度 ${(candidate.confidence * 100).toInt()}% · ${candidate.note}", fontSize = 12.sp, color = Color(0xFF8A92A1))
                                 OutlinedButton(
@@ -2401,12 +3327,12 @@ fun AiMealAnalysisDialog(
                 Text(
                     text = if (imageDataUrl != null) {
                         if (imageType == RecognitionImageType.NutritionLabel) {
-                            "说明：如果图片是营养成分表，AI 会优先直接读取表格里的数值，而不是按食物照片去估算。"
+                            "说明：如果图片是营养成分表，AI 会优先直接读取表格里的数值，而不是按食物照片去估算。相关估算口径会尽量参考《中国居民膳食指南》。"
                         } else {
-                            "说明：图片识别会估算食物类型、份量与营养素，保存前仍建议按实际重量校对。"
+                            "说明：图片识别会估算食物类型、份量与营养素，相关估算口径会尽量参考《中国居民膳食指南》；保存前仍建议按实际重量校对。"
                         }
                     } else {
-                        "说明：当前记录分析会结合手动输入生成候选结果，也可通过拍照或相册进行图片识别。"
+                        "说明：当前记录分析会结合手动输入生成候选结果，也可通过拍照或相册进行图片识别；相关估算口径会尽量参考《中国居民膳食指南》。"
                     },
                     fontSize = 12.sp,
                     color = Color(0xFF8A92A1)
@@ -2543,11 +3469,21 @@ fun FoodLibraryScreen(
     var useCustomTag by remember { mutableStateOf("") }
     var searchText by remember { mutableStateOf("") }
     var selectedCategory by remember { mutableStateOf("全部") }
-    val categories = listOf("全部") + foods.map { it.category }.distinct().sorted()
-    val filteredFoods = foods.filter { food ->
+    var showHiddenFoodsDialog by remember { mutableStateOf(false) }
+    var hiddenFoodSearchText by remember { mutableStateOf("") }
+    val visibleFoods = foods.filterNot { it.isHidden }
+    val hiddenFoods = foods.filter { it.isHidden }
+    val categories = listOf("全部") + visibleFoods.map { it.category }.distinct().sorted()
+    val filteredFoods = visibleFoods.filter { food ->
         val matchesSearch = searchText.isBlank() || food.name.contains(searchText.trim(), ignoreCase = true)
         val matchesCategory = selectedCategory == "全部" || food.category == selectedCategory
         matchesSearch && matchesCategory
+    }
+    val filteredHiddenFoods = hiddenFoods.filter { food ->
+        val keyword = hiddenFoodSearchText.trim()
+        keyword.isBlank() ||
+            food.name.contains(keyword, ignoreCase = true) ||
+            food.category.contains(keyword, ignoreCase = true)
     }
 
     foodPendingDelete?.let { food ->
@@ -2576,9 +3512,75 @@ fun FoodLibraryScreen(
         )
     }
 
+    if (showHiddenFoodsDialog) {
+        AlertDialog(
+            onDismissRequest = { showHiddenFoodsDialog = false },
+            title = { Text(text = "隐藏食物列表", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "隐藏食物不会出现在食物库主页面和首页常用食物里，但不会被删除。",
+                        fontSize = 12.sp,
+                        color = Color(0xFF6F7785)
+                    )
+                    AppTextField(
+                        label = "搜索隐藏食物",
+                        value = hiddenFoodSearchText,
+                        onValueChange = { hiddenFoodSearchText = it }
+                    )
+                    if (hiddenFoods.isEmpty()) {
+                        Text(text = "当前没有隐藏食物。", fontSize = 13.sp, color = Color(0xFF8A92A1))
+                    } else if (filteredHiddenFoods.isEmpty()) {
+                        Text(text = "没有匹配的隐藏食物。", fontSize = 13.sp, color = Color(0xFF8A92A1))
+                    } else {
+                        filteredHiddenFoods.forEach { food ->
+                            val index = foods.indexOfFirst { it === food }
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(16.dp),
+                                colors = CardDefaults.cardColors(containerColor = Color(0xBFFFFFFF))
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Text(text = food.name, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Color(0xFF161A23))
+                                    Text(
+                                        text = "${food.category} · ${formatNumber(food.calories)} kcal · ${foodServingText(food)}",
+                                        fontSize = 12.sp,
+                                        color = Color(0xFF6F7785)
+                                    )
+                                    Text(
+                                        text = "碳水${formatNumber(food.carbs)}g · 蛋白${formatNumber(food.protein)}g · 脂肪${formatNumber(food.fat)}g",
+                                        fontSize = 12.sp,
+                                        color = Color(0xFF8A92A1)
+                                    )
+                                    OutlinedButton(
+                                        onClick = {
+                                            if (index >= 0) onUpdateFood(index, food.copy(isHidden = false))
+                                        },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(14.dp)
+                                    ) {
+                                        Text(text = "恢复显示", fontSize = 12.sp)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = { showHiddenFoodsDialog = false }, shape = RoundedCornerShape(14.dp)) {
+                    Text(text = "关闭")
+                }
+            }
+        )
+    }
+
     if (showAddFoodDialog) {
         FoodEditorDialog(
-            initialFood = FoodItem(name = "", protein = 0, fat = 0, carbs = 0, category = "自定义"),
+            initialFood = FoodItem(name = "", protein = 0.0, fat = 0.0, carbs = 0.0, category = "自定义"),
             onDismiss = { showAddFoodDialog = false },
             onSave = { newFood ->
                 onAddFood(newFood)
@@ -2652,7 +3654,15 @@ fun FoodLibraryScreen(
                 }
             }
 
-            if (foods.isNotEmpty()) {
+            OutlinedButton(
+                onClick = { showHiddenFoodsDialog = true },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Text(text = "查看隐藏食物列表（${hiddenFoods.size}）")
+            }
+
+            if (visibleFoods.isNotEmpty()) {
                 AppTextField(
                     label = "搜索食物",
                     value = searchText,
@@ -2665,16 +3675,29 @@ fun FoodLibraryScreen(
                 )
             }
 
-            if (foods.isEmpty()) {
+            if (visibleFoods.isEmpty()) {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(20.dp),
                     colors = CardDefaults.cardColors(containerColor = Color(0xBFFFFFFF))
                 ) {
                     Column(modifier = Modifier.padding(20.dp)) {
-                        Text(text = "食物库还是空的", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF161A23))
+                        Text(
+                            text = if (foods.isEmpty()) "食物库还是空的" else "主页面没有显示中的食物",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFF161A23)
+                        )
                         Spacer(modifier = Modifier.height(4.dp))
-                        Text(text = "添加饮食记录时点击“保存到食物库”即可收藏。", fontSize = 13.sp, color = Color(0xFF8A92A1))
+                        Text(
+                            text = if (foods.isEmpty()) {
+                                "添加饮食记录时点击“保存到食物库”即可收藏。"
+                            } else {
+                                "可以新增食物，或在隐藏食物列表里恢复已有食物。"
+                            },
+                            fontSize = 13.sp,
+                            color = Color(0xFF8A92A1)
+                        )
                     }
                 }
             } else if (filteredFoods.isEmpty()) {
@@ -2700,6 +3723,7 @@ fun FoodLibraryScreen(
                             useCustomTag = tags.firstOrNull().orEmpty()
                         },
                         onEdit = { if (index >= 0) editorState = FoodEditorState(index, food) },
+                        onHide = { if (index >= 0) onUpdateFood(index, food.copy(isHidden = true)) },
                         onDelete = { foodPendingDelete = food }
                     )
                 }
@@ -2723,9 +3747,11 @@ fun FoodLibraryScreen(
 @Composable
 fun PlanScreen(
     selectedDate: String,
+    userProfile: UserProfile,
     plans: List<NutritionPlan>,
     selectedPlanId: Long?,
     onBack: () -> Unit,
+    onSaveUserProfile: (UserProfile) -> Unit,
     onSelectPlanForDate: (Long) -> Unit,
     onSavePlan: (NutritionPlan) -> Unit,
     onDeletePlan: (Long) -> Unit,
@@ -2742,15 +3768,46 @@ fun PlanScreen(
     var waterTargetMl by remember { mutableStateOf("2000") }
     var dailyCalorieDeficit by remember { mutableStateOf("0") }
     var note by remember { mutableStateOf("") }
+    var heightCm by remember(userProfile) { mutableStateOf(userProfile.heightCm.takeIf { it > 0 }?.let(::formatNumber).orEmpty()) }
+    var weightKg by remember(userProfile) { mutableStateOf(userProfile.weightKg.takeIf { it > 0 }?.let(::formatNumber).orEmpty()) }
+    var ageYears by remember(userProfile) { mutableStateOf(userProfile.ageYears.takeIf { it > 0 }?.toString().orEmpty()) }
+    var biologicalSex by remember(userProfile) { mutableStateOf(userProfile.biologicalSex) }
     var errorText by remember { mutableStateOf<String?>(null) }
+    var generatedPlanInfoText by remember { mutableStateOf<String?>(null) }
     var pendingDeletePlanId by remember { mutableStateOf<Long?>(null) }
+    var showHiddenPlansDialog by remember { mutableStateOf(false) }
+    var hiddenPlanSearchText by remember { mutableStateOf("") }
+    val planScrollState = rememberScrollState()
 
     val previewCalories = calculateCalories(
-        protein = protein.toIntOrNull() ?: 0,
-        fat = fat.toIntOrNull() ?: 0,
-        carbs = carbs.toIntOrNull() ?: 0
+        protein = parseOneDecimal(protein) ?: 0.0,
+        fat = parseOneDecimal(fat) ?: 0.0,
+        carbs = parseOneDecimal(carbs) ?: 0.0
+    )
+    val previewBmr = calculateBasalMetabolism(
+        UserProfile(
+            heightCm = parseOneDecimal(heightCm) ?: 0.0,
+            weightKg = parseOneDecimal(weightKg) ?: 0.0,
+            ageYears = ageYears.toIntOrNull() ?: 0,
+            biologicalSex = biologicalSex
+        )
     )
     val currentPlan = plans.firstOrNull { it.id == selectedPlanId } ?: plans.firstOrNull { it.isDefault } ?: plans.firstOrNull()
+    val visiblePlans = plans.filterNot { it.isHidden }
+    val hiddenPlans = plans.filter { it.isHidden }
+    val filteredHiddenPlans = hiddenPlans.filter { plan ->
+        val keyword = hiddenPlanSearchText.trim()
+        keyword.isBlank() ||
+            plan.name.contains(keyword, ignoreCase = true) ||
+            plan.note.contains(keyword, ignoreCase = true)
+    }
+
+    LaunchedEffect(showPlanEditor, editingPlanId) {
+        if (showPlanEditor || editingPlanId != null) {
+            kotlinx.coroutines.delay(120)
+            planScrollState.animateScrollTo(planScrollState.maxValue)
+        }
+    }
 
     pendingDeletePlanId?.let { planId ->
         val plan = plans.firstOrNull { it.id == planId }
@@ -2779,11 +3836,72 @@ fun PlanScreen(
         }
     }
 
+    if (showHiddenPlansDialog) {
+        AlertDialog(
+            onDismissRequest = { showHiddenPlansDialog = false },
+            title = { Text(text = "隐藏计划列表", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "隐藏计划不会出现在计划设置主页面，但不会删除，也不会影响历史记录里的计划显示。",
+                        fontSize = 12.sp,
+                        color = Color(0xFF6F7785)
+                    )
+                    AppTextField(
+                        label = "搜索隐藏计划",
+                        value = hiddenPlanSearchText,
+                        onValueChange = { hiddenPlanSearchText = it }
+                    )
+                    if (hiddenPlans.isEmpty()) {
+                        Text(text = "当前没有隐藏计划。", fontSize = 13.sp, color = Color(0xFF8A92A1))
+                    } else if (filteredHiddenPlans.isEmpty()) {
+                        Text(text = "没有匹配的隐藏计划。", fontSize = 13.sp, color = Color(0xFF8A92A1))
+                    } else {
+                        filteredHiddenPlans.forEach { plan ->
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(16.dp),
+                                colors = CardDefaults.cardColors(containerColor = Color(0xBFFFFFFF))
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Text(text = plan.name, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Color(0xFF161A23))
+                                    Text(
+                                        text = "${formatNumber(plan.targetCalories)} kcal · 蛋白${formatNumber(plan.targetProtein)}g 脂肪${formatNumber(plan.targetFat)}g 碳水${formatNumber(plan.targetCarbs)}g · 缺口${formatNumber(plan.dailyCalorieDeficit)}kcal",
+                                        fontSize = 12.sp,
+                                        color = Color(0xFF6F7785)
+                                    )
+                                    if (plan.note.isNotBlank()) {
+                                        Text(text = plan.note, fontSize = 12.sp, color = Color(0xFF8A92A1))
+                                    }
+                                    OutlinedButton(
+                                        onClick = { onSavePlan(plan.copy(isHidden = false)) },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(14.dp)
+                                    ) {
+                                        Text(text = "恢复显示", fontSize = 12.sp)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = { showHiddenPlansDialog = false }, shape = RoundedCornerShape(14.dp)) {
+                    Text(text = "关闭")
+                }
+            }
+        )
+    }
+
     AppBackground {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState()),
+                .verticalScroll(planScrollState),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             Spacer(modifier = Modifier.height(20.dp))
@@ -2825,15 +3943,158 @@ fun PlanScreen(
                 ) {
                     Text(text = "新建计划")
                 }
+                OutlinedButton(
+                    onClick = { showHiddenPlansDialog = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Text(text = "查看隐藏计划列表（${hiddenPlans.size}）")
+                }
             }
 
-            if (plans.isEmpty()) {
+            FormCard {
+                Text(
+                    text = "个人基础资料",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF161A23)
+                )
+                AppTextField(label = "身高 cm", value = heightCm, onValueChange = { heightCm = it }, isNumber = true)
+                AppTextField(label = "体重 kg", value = weightKg, onValueChange = { weightKg = it }, isNumber = true)
+                AppTextField(label = "年龄（周岁）", value = ageYears, onValueChange = { ageYears = it.filter { ch -> ch.isDigit() } }, isNumber = true)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = { biologicalSex = BiologicalSex.Male },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Text(text = if (biologicalSex == BiologicalSex.Male) "✓ 生理男性" else "生理男性")
+                    }
+                    OutlinedButton(
+                        onClick = { biologicalSex = BiologicalSex.Female },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Text(text = if (biologicalSex == BiologicalSex.Female) "✓ 生理女性" else "生理女性")
+                    }
+                }
+                Text(
+                    text = if (previewBmr != null) {
+                        "按当前资料估算基础代谢：${formatNumber(previewBmr)} kcal"
+                    } else {
+                        "填写完整后会自动估算基础代谢"
+                    },
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color(0xFF303747)
+                )
+                OutlinedButton(
+                    onClick = {
+                        val parsedHeight = parseOneDecimal(heightCm)
+                        val parsedWeight = parseOneDecimal(weightKg)
+                        val parsedAge = ageYears.toIntOrNull()
+                        when {
+                            parsedHeight == null || parsedWeight == null || parsedAge == null -> {
+                                errorText = "请输入有效的身高、体重和年龄"
+                            }
+                            parsedHeight <= 0.0 || parsedWeight <= 0.0 || parsedAge <= 0 -> {
+                                errorText = "身高、体重和年龄都需要大于 0"
+                            }
+                            else -> {
+                                onSaveUserProfile(
+                                    UserProfile(
+                                        heightCm = parsedHeight,
+                                        weightKg = parsedWeight,
+                                        ageYears = parsedAge,
+                                        biologicalSex = biologicalSex
+                                    )
+                                )
+                                errorText = null
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Text(text = "保存基础资料")
+                }
+                OutlinedButton(
+                    onClick = {
+                        val parsedHeight = parseOneDecimal(heightCm)
+                        val parsedWeight = parseOneDecimal(weightKg)
+                        val parsedAge = ageYears.toIntOrNull()
+                        when {
+                            parsedHeight == null || parsedWeight == null || parsedAge == null -> {
+                                errorText = "请先填写完整且有效的身高、体重、年龄和生理性别"
+                                generatedPlanInfoText = null
+                            }
+                            parsedHeight <= 0.0 || parsedWeight <= 0.0 || parsedAge <= 0 -> {
+                                errorText = "身高、体重和年龄都需要大于 0"
+                                generatedPlanInfoText = null
+                            }
+                            else -> {
+                                val currentProfile = UserProfile(
+                                    heightCm = parsedHeight,
+                                    weightKg = parsedWeight,
+                                    ageYears = parsedAge,
+                                    biologicalSex = biologicalSex
+                                )
+                                val generatedPlans = generateAutoCutPlans(currentProfile, plans)
+                                if (generatedPlans.isEmpty()) {
+                                    errorText = "当前资料不足，暂时无法生成计划"
+                                    generatedPlanInfoText = null
+                                } else {
+                                    generatedPlans.forEach(onSavePlan)
+                                    generatedPlans.firstOrNull { it.name.startsWith("低碳活动日") }?.let { lowCarbActivePlan ->
+                                        if (selectedPlanId == null) {
+                                            onSelectPlanForDate(lowCarbActivePlan.id)
+                                        }
+                                    }
+                                    errorText = null
+                                    generatedPlanInfoText = "已生成或更新 3 份减脂计划：高碳日、低碳活动日、低碳休息日。"
+                                }
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Text(text = "一键生成当前体重的三份减脂计划")
+                }
+                Text(
+                    text = "生成规则：蛋白质按体重 1.8 倍保证；高碳日脂肪按生理男性体重 0.8 倍、生理女性体重 0.9 倍；低碳活动日和低碳休息日脂肪按体重 1.1 倍；剩余热量全部分配给碳水。",
+                    fontSize = 12.sp,
+                    color = Color(0xFF8A92A1)
+                )
+                generatedPlanInfoText?.let {
+                    Text(
+                        text = it,
+                        fontSize = 12.sp,
+                        color = Color(0xFF2E9D63),
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+
+            if (visiblePlans.isEmpty()) {
                 FormCard {
-                    Text(text = "还没有计划", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF161A23))
-                    Text(text = "先新建一个计划，用于今天或设为默认。", fontSize = 13.sp, color = Color(0xFF8A92A1))
+                    Text(
+                        text = if (plans.isEmpty()) "还没有计划" else "主页面没有显示中的计划",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFF161A23)
+                    )
+                    Text(
+                        text = if (plans.isEmpty()) "先新建一个计划，用于今天或设为默认。" else "可以新建计划，或在隐藏计划列表里恢复已有计划。",
+                        fontSize = 13.sp,
+                        color = Color(0xFF8A92A1)
+                    )
                 }
             } else {
-                plans.forEach { plan ->
+                visiblePlans.forEach { plan ->
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(20.dp),
@@ -2858,7 +4119,7 @@ fun PlanScreen(
                                 }
                             }
                             Text(
-                                text = "${plan.targetCalories} kcal · 蛋白${plan.targetProtein}g 脂肪${plan.targetFat}g 碳水${plan.targetCarbs}g · 饮水${plan.waterTargetMl}ml · 缺口${plan.dailyCalorieDeficit}kcal",
+                                text = "${formatNumber(plan.targetCalories)} kcal · 蛋白${formatNumber(plan.targetProtein)}g 脂肪${formatNumber(plan.targetFat)}g 碳水${formatNumber(plan.targetCarbs)}g · 饮水${formatNumber(plan.waterTargetMl)}ml · 缺口${formatNumber(plan.dailyCalorieDeficit)}kcal",
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = Color(0xFF303747)
@@ -2880,17 +4141,23 @@ fun PlanScreen(
                                         editingPlanId = plan.id
                                         showPlanEditor = true
                                         name = plan.name
-                                        protein = plan.targetProtein.toString()
-                                        fat = plan.targetFat.toString()
-                                        carbs = plan.targetCarbs.toString()
-                                        waterTargetMl = plan.waterTargetMl.toString()
-                                        dailyCalorieDeficit = plan.dailyCalorieDeficit.toString()
+                                        protein = formatNumber(plan.targetProtein)
+                                        fat = formatNumber(plan.targetFat)
+                                        carbs = formatNumber(plan.targetCarbs)
+                                        waterTargetMl = formatNumber(plan.waterTargetMl)
+                                        dailyCalorieDeficit = formatNumber(plan.dailyCalorieDeficit)
                                         note = plan.note
                                         errorText = null
                                     },
                                     shape = RoundedCornerShape(14.dp)
                                 ) {
                                     Text(text = "编辑", fontSize = 12.sp)
+                                }
+                                OutlinedButton(
+                                    onClick = { onSavePlan(plan.copy(isHidden = true)) },
+                                    shape = RoundedCornerShape(14.dp)
+                                ) {
+                                    Text(text = "隐藏", fontSize = 12.sp)
                                 }
                                 if (plans.size > 1) {
                                     OutlinedButton(onClick = { pendingDeletePlanId = plan.id }, shape = RoundedCornerShape(14.dp)) {
@@ -2924,7 +4191,7 @@ fun PlanScreen(
                     )
                     AppTextField(label = "备注", value = note, onValueChange = { note = it })
                     Text(
-                        text = "自动计算目标热量：$previewCalories kcal（蛋白质×4 + 脂肪×9 + 碳水×4）",
+                        text = "自动计算目标热量：${formatNumber(previewCalories)} kcal（蛋白质×4 + 脂肪×9 + 碳水×4）",
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = Color(0xFF303747)
@@ -2937,11 +4204,11 @@ fun PlanScreen(
 
                 Button(
                     onClick = {
-                        val parsedProtein = protein.toIntOrNull()
-                        val parsedFat = fat.toIntOrNull()
-                        val parsedCarbs = carbs.toIntOrNull()
-                        val parsedWater = waterTargetMl.toIntOrNull()
-                        val parsedDailyCalorieDeficit = dailyCalorieDeficit.toIntOrNull()
+                        val parsedProtein = parseOneDecimal(protein)
+                        val parsedFat = parseOneDecimal(fat)
+                        val parsedCarbs = parseOneDecimal(carbs)
+                        val parsedWater = parseOneDecimal(waterTargetMl)
+                        val parsedDailyCalorieDeficit = parseOneDecimal(dailyCalorieDeficit)
 
                         if (name.isBlank()) {
                             errorText = "请输入计划名称"
@@ -3015,11 +4282,11 @@ fun ReportScreen(
     plan: NutritionPlan?,
     meals: List<MealRecord>,
     exerciseBurnRecord: ExerciseBurnRecord?,
-    adjustedTargetCalories: Int,
-    adjustedTargetProtein: Int,
-    adjustedTargetCarbs: Int,
-    waterTargetMl: Int,
-    drunkWaterMl: Int,
+    adjustedTargetCalories: Double,
+    adjustedTargetProtein: Double,
+    adjustedTargetCarbs: Double,
+    waterTargetMl: Double,
+    drunkWaterMl: Double,
     aiSettingsList: List<AiSettings>,
     onBack: () -> Unit
 ) {
@@ -3031,7 +4298,7 @@ fun ReportScreen(
     val consumedCarbs = meals.sumOf { it.carbs }
     val targetCalories = adjustedTargetCalories
     val targetProtein = adjustedTargetProtein
-    val targetFat = plan?.targetFat ?: 0
+    val targetFat = plan?.targetFat ?: 0.0
     val targetCarbs = adjustedTargetCarbs
     val remainingCalories = targetCalories - consumedCalories
     val remainingProtein = targetProtein - consumedProtein
@@ -3069,8 +4336,8 @@ fun ReportScreen(
                     text = if (meals.isEmpty()) {
                         "今天还没有饮食记录。建议先添加早餐、午餐、晚餐或加餐记录，再查看完整分析。"
                     } else {
-                        "今天共记录 ${meals.size} 条饮食，已摄入 $consumedCalories kcal。" +
-                            if (plan != null) " 当前计划为「${plan.name}」，运动补回后目标 $targetCalories kcal。" else " 当前还没有可用计划。"
+                        "今天共记录 ${meals.size} 条饮食，已摄入 ${formatNumber(consumedCalories)} kcal。" +
+                            if (plan != null) " 当前计划为「${plan.name}」，运动补回后目标 ${formatNumber(targetCalories)} kcal。" else " 当前还没有可用计划。"
                     },
                     fontSize = 14.sp,
                     color = Color(0xFF303747)
@@ -3078,20 +4345,20 @@ fun ReportScreen(
             }
 
             ReportSectionCard(title = "热量状态") {
-                ReportMetricRow(label = "目标热量", value = if (targetCalories > 0) "$targetCalories kcal" else "未设置")
-                if ((exerciseBurnRecord?.calories ?: 0) > 0) {
-                    ReportMetricRow(label = "额外运动消耗", value = "+${exerciseBurnRecord?.calories ?: 0} kcal")
+                ReportMetricRow(label = "目标热量", value = if (targetCalories > 0) "${formatNumber(targetCalories)} kcal" else "未设置")
+                if ((exerciseBurnRecord?.calories ?: 0.0) > 0) {
+                    ReportMetricRow(label = "额外运动消耗", value = "+${formatNumber(exerciseBurnRecord?.calories ?: 0.0)} kcal")
                 }
-                ReportMetricRow(label = "已摄入", value = "$consumedCalories kcal")
+                ReportMetricRow(label = "已摄入", value = "${formatNumber(consumedCalories)} kcal")
                 ReportMetricRow(
                     label = if (remainingCalories >= 0) "剩余可摄入" else "已超出",
-                    value = "${kotlin.math.abs(remainingCalories)} kcal",
+                    value = "${formatNumber(kotlin.math.abs(remainingCalories))} kcal",
                     color = if (remainingCalories >= 0) Color(0xFF35C759) else Color(0xFFEF5350)
                 )
                 Text(
                     text = when {
                         plan == null -> "请先创建或选择热量计划，以便计算剩余热量。"
-                        consumedCalories == 0 -> "暂无摄入数据，无法判断热量完成度。"
+                        consumedCalories == 0.0 -> "暂无摄入数据，无法判断热量完成度。"
                         remainingCalories < 0 -> "今日热量已经超出目标，后续饮食建议以低热量、高饱腹感食物为主。"
                         remainingCalories <= targetCalories * 0.15 -> "今日热量已经接近目标，继续保持即可。"
                         else -> "今日仍有一定热量空间，可以根据蛋白质、碳水和脂肪缺口补充。"
@@ -3099,7 +4366,7 @@ fun ReportScreen(
                     fontSize = 13.sp,
                     color = Color(0xFF6F7785)
                 )
-                if ((exerciseBurnRecord?.calories ?: 0) > 0) {
+                if ((exerciseBurnRecord?.calories ?: 0.0) > 0) {
                     Text(
                         text = "补回公式：运动消耗热量补充 = 85% 碳水 + 15% 蛋白质。",
                         fontSize = 12.sp,
@@ -3120,11 +4387,11 @@ fun ReportScreen(
             }
 
             ReportSectionCard(title = "饮水建议") {
-                ReportMetricRow(label = "饮水目标", value = "$waterTargetMl ml")
-                ReportMetricRow(label = "已饮水", value = "$drunkWaterMl ml")
+                ReportMetricRow(label = "饮水目标", value = "${formatNumber(waterTargetMl)} ml")
+                ReportMetricRow(label = "已饮水", value = "${formatNumber(drunkWaterMl)} ml")
                 ReportMetricRow(
                     label = if (remainingWater > 0) "剩余饮水" else "完成状态",
-                    value = if (remainingWater > 0) "$remainingWater ml" else "已完成",
+                    value = if (remainingWater > 0) "${formatNumber(remainingWater)} ml" else "已完成",
                     color = if (remainingWater > 0) Color(0xFF29B6F6) else Color(0xFF35C759)
                 )
                 Text(
@@ -3137,7 +4404,7 @@ fun ReportScreen(
             ReportSectionCard(title = "AI 自然语言建议") {
                 Text(
                     text = if (reportAiSettings != null) {
-                        "将使用 ${reportAiSettings.providerName} · ${reportAiSettings.modelName} 生成报告。"
+                        "将使用 ${reportAiSettings.providerName} · ${reportAiSettings.modelName} 生成报告，相关建议会尽量参考《中国居民膳食指南》，并结合食物名称估算膳食纤维、常见矿物质及食物质量。"
                     } else {
                         "当前没有可用文字生成工作 AI，请在 AI 设置中启用并选择至少一个文字生成工作 AI。"
                     },
@@ -3190,7 +4457,7 @@ fun ReportScreen(
 
             ReportSectionCard(title = "注意事项") {
                 Text(
-                    text = "本报告仅基于你记录的数据进行计算和提示，仅供参考，不构成医疗建议。特殊人群或有疾病管理需求时，请咨询专业人士。",
+                    text = "本报告及 app 内相关营养建议、AI 估算会尽量参考《中国居民膳食指南》，仅基于你记录的数据供日常参考，不构成医疗建议。特殊人群或有疾病管理需求时，请咨询专业人士。",
                     fontSize = 13.sp,
                     color = Color(0xFF6F7785)
                 )
@@ -3472,24 +4739,24 @@ fun ReportMetricRow(
     }
 }
 
-fun nutritionGapText(consumed: Int, target: Int, unit: String): String {
-    if (target <= 0) return "已摄入 $consumed$unit · 未设置目标"
+fun nutritionGapText(consumed: Double, target: Double, unit: String): String {
+    if (target <= 0) return "已摄入 ${formatNumber(consumed)}$unit · 未设置目标"
     val remaining = target - consumed
     return if (remaining >= 0) {
-        "已摄入 $consumed$unit / 目标 $target$unit · 剩余 $remaining$unit"
+        "已摄入 ${formatNumber(consumed)}$unit / 目标 ${formatNumber(target)}$unit · 剩余 ${formatNumber(remaining)}$unit"
     } else {
-        "已摄入 $consumed$unit / 目标 $target$unit · 超出 ${kotlin.math.abs(remaining)}$unit"
+        "已摄入 ${formatNumber(consumed)}$unit / 目标 ${formatNumber(target)}$unit · 超出 ${formatNumber(kotlin.math.abs(remaining))}$unit"
     }
 }
 
-fun gapColor(remaining: Int): Color {
+fun gapColor(remaining: Double): Color {
     return if (remaining >= 0) Color(0xFF303747) else Color(0xFFEF5350)
 }
 
 fun macroSuggestionText(
-    remainingProtein: Int,
-    remainingFat: Int,
-    remainingCarbs: Int,
+    remainingProtein: Double,
+    remainingFat: Double,
+    remainingCarbs: Double,
     hasPlan: Boolean
 ): String {
     if (!hasPlan) return "请先创建或选择计划，以便生成更准确的宏量营养素建议。"
@@ -3501,8 +4768,148 @@ fun macroSuggestionText(
     return suggestions.ifEmpty { listOf("宏量营养素整体接近目标，保持当前节奏即可。") }.joinToString("\n")
 }
 
+fun calculateBasalMetabolism(profile: UserProfile): Double? {
+    if (profile.heightCm <= 0.0 || profile.weightKg <= 0.0 || profile.ageYears <= 0) return null
+    val base = 10.0 * profile.weightKg + 6.25 * profile.heightCm - 5.0 * profile.ageYears
+    return roundOneDecimal(
+        when (profile.biologicalSex) {
+            BiologicalSex.Male -> base + 5.0
+            BiologicalSex.Female -> base - 161.0
+        }
+    )
+}
+
+fun calculateNormalActivityTotalCalories(profile: UserProfile): Double? {
+    val basalMetabolism = calculateBasalMetabolism(profile) ?: return null
+    val normalActivityCalories = profile.weightKg * 8.2
+    return roundOneDecimal(basalMetabolism + normalActivityCalories)
+}
+
+fun generatedWeightPlanName(prefix: String, weightKg: Double): String {
+    return "$prefix（${formatNumber(weightKg)}kg）"
+}
+
+fun solveCarbsWithFixedFat(targetCalories: Double, proteinGrams: Double, fatGrams: Double): Pair<Double, Double> {
+    val normalizedFat = fatGrams.coerceAtLeast(0.0)
+    val remainingCalories = targetCalories - proteinGrams * 4.0 - normalizedFat * 9.0
+    val carbs = if (remainingCalories > 0.0) roundOneDecimal(remainingCalories / 4.0) else 0.0
+    return carbs to roundOneDecimal(normalizedFat)
+}
+
+fun solveFatWithFixedCarbs(targetCalories: Double, proteinGrams: Double, carbsGrams: Double): Pair<Double, Double> {
+    val normalizedCarbs = carbsGrams.coerceAtLeast(0.0)
+    val remainingCalories = targetCalories - proteinGrams * 4.0 - normalizedCarbs * 4.0
+    val fat = if (remainingCalories > 0.0) roundOneDecimal(remainingCalories / 9.0) else 0.0
+    return roundOneDecimal(normalizedCarbs) to fat
+}
+
+fun minimumFatTargetForHighCarbDay(profile: UserProfile): Double {
+    return roundOneDecimal(
+        when (profile.biologicalSex) {
+            BiologicalSex.Male -> profile.weightKg * 0.8
+            BiologicalSex.Female -> profile.weightKg * 0.9
+        }
+    )
+}
+
+fun generateAutoCutPlans(profile: UserProfile, existingPlans: List<NutritionPlan>): List<NutritionPlan> {
+    val weightKg = profile.weightKg
+    val basalMetabolism = calculateBasalMetabolism(profile) ?: return emptyList()
+    val normalActivityTotalCalories = calculateNormalActivityTotalCalories(profile) ?: return emptyList()
+    if (weightKg <= 0.0) return emptyList()
+
+    val proteinTarget = roundOneDecimal(weightKg * 1.8)
+    val highCarbCalories = roundOneDecimal(normalActivityTotalCalories - 500.0)
+    val lowCarbActiveCalories = roundOneDecimal(normalActivityTotalCalories - 500.0)
+    val lowCarbRestCalories = roundOneDecimal(basalMetabolism + 100.0)
+    val highCarbFatTarget = minimumFatTargetForHighCarbDay(profile)
+    val lowCarbFatTarget = roundOneDecimal(weightKg * 1.1)
+    val (highCarbCarbs, highCarbFat) = solveCarbsWithFixedFat(
+        targetCalories = highCarbCalories,
+        proteinGrams = proteinTarget,
+        fatGrams = highCarbFatTarget
+    )
+    val (lowCarbActiveCarbs, lowCarbActiveFat) = solveCarbsWithFixedFat(
+        targetCalories = lowCarbActiveCalories,
+        proteinGrams = proteinTarget,
+        fatGrams = lowCarbFatTarget
+    )
+    val (lowCarbRestCarbs, lowCarbRestFat) = solveCarbsWithFixedFat(
+        targetCalories = lowCarbRestCalories,
+        proteinGrams = proteinTarget,
+        fatGrams = lowCarbFatTarget
+    )
+
+    val generatedPlanSpecs = listOf(
+        Pair(
+            generatedWeightPlanName("高碳日", weightKg),
+            NutritionPlan(
+                id = 0L,
+                name = "",
+                targetCalories = highCarbCalories,
+                targetProtein = proteinTarget,
+                targetFat = highCarbFat,
+                targetCarbs = highCarbCarbs,
+                waterTargetMl = 2000.0,
+                dailyCalorieDeficit = 500.0,
+                note = "自动生成：按正常活动日总消耗 ${formatNumber(normalActivityTotalCalories)} kcal 减 500 kcal；蛋白质按 ${formatNumber(proteinTarget)}g 保证，脂肪按${if (profile.biologicalSex == BiologicalSex.Male) "体重的 0.8 倍即 ${formatNumber(highCarbFatTarget)}g" else "体重的 0.9 倍即 ${formatNumber(highCarbFatTarget)}g"}，剩余热量全部分配给碳水。"
+            )
+        ),
+        Pair(
+            generatedWeightPlanName("低碳活动日", weightKg),
+            NutritionPlan(
+                id = 0L,
+                name = "",
+                targetCalories = lowCarbActiveCalories,
+                targetProtein = proteinTarget,
+                targetFat = lowCarbActiveFat,
+                targetCarbs = lowCarbActiveCarbs,
+                waterTargetMl = 2000.0,
+                dailyCalorieDeficit = 500.0,
+                note = "自动生成：按正常活动日总消耗 ${formatNumber(normalActivityTotalCalories)} kcal 减 500 kcal；蛋白质按 ${formatNumber(proteinTarget)}g 保证，脂肪按体重的 1.1 倍即 ${formatNumber(lowCarbFatTarget)}g，剩余热量全部分配给碳水。"
+            )
+        ),
+        Pair(
+            generatedWeightPlanName("低碳休息日", weightKg),
+            NutritionPlan(
+                id = 0L,
+                name = "",
+                targetCalories = lowCarbRestCalories,
+                targetProtein = proteinTarget,
+                targetFat = lowCarbRestFat,
+                targetCarbs = lowCarbRestCarbs,
+                waterTargetMl = 2000.0,
+                dailyCalorieDeficit = roundOneDecimal(normalActivityTotalCalories - lowCarbRestCalories),
+                note = "自动生成：按基础代谢 ${formatNumber(basalMetabolism)} kcal + 100 kcal；蛋白质按 ${formatNumber(proteinTarget)}g 保证，脂肪按体重的 1.1 倍即 ${formatNumber(lowCarbFatTarget)}g，剩余热量全部分配给碳水。"
+            )
+        )
+    )
+
+    val existingByName = existingPlans.associateBy { it.name }
+    var nextId = (existingPlans.maxOfOrNull { it.id } ?: 0L) + 1L
+    val hasDefaultPlan = existingPlans.any { it.isDefault }
+
+    return generatedPlanSpecs.map { (planName, templatePlan) ->
+        val existing = existingByName[planName]
+        val isDefault = existing?.isDefault ?: (!hasDefaultPlan && planName.startsWith("低碳活动日"))
+        templatePlan.copy(
+            id = existing?.id ?: nextId++,
+            name = planName,
+            waterTargetMl = existing?.waterTargetMl ?: templatePlan.waterTargetMl,
+            isDefault = isDefault,
+            isHidden = false
+        )
+    }
+}
+
 @Composable
 fun AppBackground(content: @Composable () -> Unit) {
+    val screenWidthDp = LocalConfiguration.current.screenWidthDp
+    val pagePadding = when {
+        screenWidthDp <= 360 -> 12.dp
+        screenWidthDp <= 412 -> 16.dp
+        else -> 20.dp
+    }
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -3541,7 +4948,7 @@ fun AppBackground(content: @Composable () -> Unit) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(20.dp)
+                .padding(pagePadding)
         ) {
             content()
         }
@@ -3573,13 +4980,15 @@ fun AppTextField(
 ) {
     OutlinedTextField(
         value = value,
-        onValueChange = onValueChange,
+        onValueChange = { nextValue ->
+            onValueChange(if (isNumber) sanitizeOneDecimalInput(nextValue) else nextValue)
+        },
         modifier = Modifier.fillMaxWidth(),
         label = { Text(text = label) },
         singleLine = true,
         shape = RoundedCornerShape(16.dp),
         keyboardOptions = if (isNumber) {
-            KeyboardOptions(keyboardType = KeyboardType.Number)
+            KeyboardOptions(keyboardType = KeyboardType.Decimal)
         } else {
             KeyboardOptions.Default
         }
@@ -3589,12 +4998,12 @@ fun AppTextField(
 @Composable
 fun SummaryCard(
     planName: String,
-    targetCalories: Int,
-    eatenCalories: Int,
-    remainingCalories: Int
+    targetCalories: Double,
+    eatenCalories: Double,
+    remainingCalories: Double
 ) {
     val progress = nutritionProgress(eatenCalories, targetCalories)
-    val percentText = if (targetCalories > 0) "${eatenCalories * 100 / targetCalories}%" else "0%"
+    val percentText = if (targetCalories > 0) "${formatNumber(eatenCalories * 100 / targetCalories)}%" else "0%"
     val statusColor = if (remainingCalories >= 0) Color(0xFF111827) else Color(0xFFEF5350)
     val progressColor = when {
         targetCalories <= 0 -> Color(0xFF8A92A1)
@@ -3616,7 +5025,7 @@ fun SummaryCard(
                 color = Color(0xFF6F7785)
             )
             Text(
-                text = if (remainingCalories >= 0) "$remainingCalories kcal" else "超出 ${kotlin.math.abs(remainingCalories)} kcal",
+                text = if (remainingCalories >= 0) "${formatNumber(remainingCalories)} kcal" else "超出 ${formatNumber(kotlin.math.abs(remainingCalories))} kcal",
                 fontSize = 42.sp,
                 fontWeight = FontWeight.Bold,
                 color = statusColor
@@ -3641,7 +5050,7 @@ fun SummaryCard(
                     targetCalories <= 0 -> "请先设置热量目标"
                     remainingCalories < 0 -> "今日热量已超标，建议后续选择低热量食物。"
                     progress >= 0.85f -> "已经接近目标，继续保持并注意份量。"
-                    eatenCalories == 0 -> "还没有摄入记录，点击下方按钮添加第一餐。"
+                    eatenCalories == 0.0 -> "还没有摄入记录，点击下方按钮添加第一餐。"
                     else -> "今日仍有热量空间，可结合营养素缺口安排饮食。"
                 },
                 fontSize = 13.sp,
@@ -3651,12 +5060,105 @@ fun SummaryCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                SummaryItem(label = "目标", value = "$targetCalories")
-                SummaryItem(label = "已摄入", value = "$eatenCalories")
+                SummaryItem(label = "目标", value = formatNumber(targetCalories))
+                SummaryItem(label = "已摄入", value = formatNumber(eatenCalories))
                 SummaryItem(label = "完成", value = percentText)
             }
         }
     }
+}
+
+@Composable
+fun RemainingFoodEquivalentDialog(
+    remainingCarbs: Double,
+    remainingProtein: Double,
+    equivalent: RemainingFoodEquivalent?,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(text = "剩余营养素相当于多少食物？", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    text = "当前剩余：碳水 ${formatNumber(remainingCarbs.coerceAtLeast(0.0))}g，蛋白质 ${formatNumber(remainingProtein.coerceAtLeast(0.0))}g。",
+                    fontSize = 13.sp,
+                    color = Color(0xFF6F7785)
+                )
+                when {
+                    remainingCarbs <= 0.0 && remainingProtein <= 0.0 -> {
+                        Text(
+                            text = "碳水和蛋白质都已经没有剩余空间了，今天后续饮食建议以控制总量为主。",
+                            fontSize = 14.sp,
+                            color = Color(0xFF303747)
+                        )
+                    }
+                    remainingCarbs < 0.0 || remainingProtein < 0.0 -> {
+                        Text(
+                            text = "当前至少有一项已经超标，暂时不适合再按最喜爱主食和蛋白来源做补充换算。",
+                            fontSize = 14.sp,
+                            color = Color(0xFF303747)
+                        )
+                    }
+                    equivalent == null -> {
+                        Text(
+                            text = "历史记录里还不足以稳定判断你最喜爱的主食和蛋白来源，或者暂时找不到能精确配平剩余碳水、蛋白的组合。",
+                            fontSize = 14.sp,
+                            color = Color(0xFF303747)
+                        )
+                    }
+                    else -> {
+                        Text(
+                            text = "根据过去记录，系统推断你常吃的主食和蛋白来源如下，并把它们换算到刚好配平当前剩余碳水、蛋白质。",
+                            fontSize = 13.sp,
+                            color = Color(0xFF6F7785)
+                        )
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(containerColor = Color(0xBFFFFFFF))
+                        ) {
+                            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(
+                                    text = "最喜爱主食：${equivalent.staple.name}",
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color(0xFF161A23)
+                                )
+                                Text(
+                                    text = "建议 ${formatServingCount(foodProfileDisplayQuantity(equivalent.staple, equivalent.stapleServingCount))} ${quantityUnitText(equivalent.staple.servingType, equivalent.staple.unitLabel)} · ${foodProfileMacroText(equivalent.staple)}",
+                                    fontSize = 13.sp,
+                                    color = Color(0xFF303747)
+                                )
+                                Text(
+                                    text = "最喜欢的蛋白来源：${equivalent.proteinSource.name}",
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color(0xFF161A23)
+                                )
+                                Text(
+                                    text = "建议 ${formatServingCount(foodProfileDisplayQuantity(equivalent.proteinSource, equivalent.proteinServingCount))} ${quantityUnitText(equivalent.proteinSource.servingType, equivalent.proteinSource.unitLabel)} · ${foodProfileMacroText(equivalent.proteinSource)}",
+                                    fontSize = 13.sp,
+                                    color = Color(0xFF303747)
+                                )
+                            }
+                        }
+                        Text(
+                            text = "换算后合计：碳水 ${formatNumber(equivalent.totalCarbs)}g，蛋白质 ${formatNumber(equivalent.totalProtein)}g。",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFF5B8DEF)
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss, shape = RoundedCornerShape(14.dp)) {
+                Text(text = "知道了")
+            }
+        }
+    )
 }
 
 @Composable
@@ -3668,15 +5170,49 @@ fun SummaryItem(label: String, value: String) {
 }
 
 @Composable
+fun BmrReminderCard(
+    basalMetabolism: Double,
+    eatenCalories: Double
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF6D8))
+    ) {
+        Column(
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "基础代谢提醒",
+                fontSize = 17.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color(0xFF8A5A00)
+            )
+            Text(
+                text = "当前已摄入 ${formatNumber(eatenCalories)} kcal，低于估算基础代谢 ${formatNumber(basalMetabolism)} kcal。",
+                fontSize = 14.sp,
+                color = Color(0xFF7A5A00)
+            )
+            Text(
+                text = "这是中等提醒：如果当天长期明显吃不够基础代谢，可能影响状态、恢复和执行感受。",
+                fontSize = 12.sp,
+                color = Color(0xFF8A6A12)
+            )
+        }
+    }
+}
+
+@Composable
 fun ExerciseBurnCard(
     exerciseBurnRecord: ExerciseBurnRecord?,
-    baseTargetCalories: Int,
-    adjustedTargetCalories: Int,
-    extraProtein: Int,
-    extraCarbs: Int,
+    baseTargetCalories: Double,
+    adjustedTargetCalories: Double,
+    extraProtein: Double,
+    extraCarbs: Double,
     onClick: () -> Unit
 ) {
-    val exerciseCalories = exerciseBurnRecord?.calories ?: 0
+    val exerciseCalories = exerciseBurnRecord?.calories ?: 0.0
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -3695,7 +5231,7 @@ fun ExerciseBurnCard(
                     )
                     Text(
                         text = if (exerciseCalories > 0) {
-                            "今日额外消耗 $exerciseCalories kcal，已自动加到当日额度"
+                            "今日额外消耗 ${formatNumber(exerciseCalories)} kcal，已自动加到当日额度"
                         } else {
                             "力量训练、有氧训练的额外消耗可以在这里补回"
                         },
@@ -3715,7 +5251,7 @@ fun ExerciseBurnCard(
             val record = exerciseBurnRecord
             if (record != null && exerciseCalories > 0) {
                 Text(
-                    text = "基础 $baseTargetCalories kcal → 今日 $adjustedTargetCalories kcal；额外碳水 +${extraCarbs.coerceAtLeast(0)}g，蛋白 +${extraProtein.coerceAtLeast(0)}g。",
+                    text = "基础 ${formatNumber(baseTargetCalories)} kcal → 今日 ${formatNumber(adjustedTargetCalories)} kcal；额外碳水 +${formatNumber(extraCarbs.coerceAtLeast(0.0))}g，蛋白 +${formatNumber(extraProtein.coerceAtLeast(0.0))}g。",
                     fontSize = 12.sp,
                     color = Color(0xFF6F7785)
                 )
@@ -3741,11 +5277,11 @@ fun ExerciseBurnDialog(
     onClear: () -> Unit
 ) {
     val coroutineScope = rememberCoroutineScope()
-    var caloriesText by remember(currentRecord) { mutableStateOf(currentRecord?.calories?.takeIf { it > 0 }?.toString().orEmpty()) }
+    var caloriesText by remember(currentRecord) { mutableStateOf(currentRecord?.calories?.takeIf { it > 0 }?.let(::formatNumber).orEmpty()) }
     var descriptionText by remember(currentRecord) { mutableStateOf(currentRecord?.description.orEmpty()) }
     var isEstimating by remember { mutableStateOf(false) }
     var errorText by remember { mutableStateOf<String?>(null) }
-    val parsedCalories = caloriesText.toIntOrNull()?.coerceAtLeast(0) ?: 0
+    val parsedCalories = parseOneDecimal(caloriesText)?.coerceAtLeast(0.0) ?: 0.0
     val extraCarbs = exerciseCarbsGrams(parsedCalories)
     val extraProtein = exerciseProteinGrams(parsedCalories)
 
@@ -3758,14 +5294,14 @@ fun ExerciseBurnDialog(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
-                    text = "$selectedDate 的力量训练、有氧训练等额外运动消耗。保存后会直接加到当天额度里。",
+                    text = "$selectedDate 的力量训练、有氧训练等额外运动消耗。AI 估算时会结合运动强度、时长、热量区间校验和运动后 EPOC，保存后会直接加到当天额度里。",
                     fontSize = 13.sp,
                     color = Color(0xFF6F7785)
                 )
                 AppTextField(
                     label = "运动消耗热量 kcal（可手动填写）",
                     value = caloriesText,
-                    onValueChange = { caloriesText = it.filter(Char::isDigit).take(5) },
+                    onValueChange = { caloriesText = it },
                     isNumber = true
                 )
                 OutlinedTextField(
@@ -3783,7 +5319,7 @@ fun ExerciseBurnDialog(
                     color = Color(0xFF8A5A00)
                 )
                 Text(
-                    text = "当前会额外加入：热量 +${parsedCalories} kcal，碳水 +${extraCarbs}g，蛋白 +${extraProtein}g，脂肪不变。",
+                    text = "当前会额外加入：热量 +${formatNumber(parsedCalories)} kcal，碳水 +${formatNumber(extraCarbs)}g，蛋白 +${formatNumber(extraProtein)}g，脂肪不变。",
                     fontSize = 12.sp,
                     color = Color(0xFF303747)
                 )
@@ -3809,7 +5345,7 @@ fun ExerciseBurnDialog(
                                 )
                             }
                             result.onSuccess { estimatedCalories ->
-                                caloriesText = estimatedCalories.coerceAtLeast(0).toString()
+                                caloriesText = formatNumber(estimatedCalories.coerceAtLeast(0.0))
                             }.onFailure { error ->
                                 errorText = friendlyAiReportErrorMessage(error)
                             }
@@ -3860,10 +5396,10 @@ fun ExerciseBurnDialog(
 
 @Composable
 fun WaterSummaryCard(
-    waterTargetMl: Int,
-    drunkWaterMl: Int,
+    waterTargetMl: Double,
+    drunkWaterMl: Double,
     waterRecords: List<WaterRecord>,
-    onAddWater: (Int) -> Unit,
+    onAddWater: (Double) -> Unit,
     onDeleteWater: (WaterRecord) -> Unit
 ) {
     val remainingWaterMl = waterTargetMl - drunkWaterMl
@@ -3897,9 +5433,9 @@ fun WaterSummaryCard(
             }
             Text(
                 text = if (remainingWaterMl >= 0) {
-                    "$drunkWaterMl / $waterTargetMl ml（剩余 $remainingWaterMl ml）"
+                    "${formatNumber(drunkWaterMl)} / ${formatNumber(waterTargetMl)} ml（剩余 ${formatNumber(remainingWaterMl)} ml）"
                 } else {
-                    "$drunkWaterMl / $waterTargetMl ml（超出 ${kotlin.math.abs(remainingWaterMl)} ml）"
+                    "${formatNumber(drunkWaterMl)} / ${formatNumber(waterTargetMl)} ml（超出 ${formatNumber(kotlin.math.abs(remainingWaterMl))} ml）"
                 },
                 fontSize = 14.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -3923,9 +5459,9 @@ fun WaterSummaryCard(
             Text(
                 text = when {
                     waterTargetMl <= 0 -> "请先设置饮水目标。"
-                    drunkWaterMl == 0 -> "今天还没有饮水记录，可以从少量多次开始。"
+                    drunkWaterMl == 0.0 -> "今天还没有饮水记录，可以从少量多次开始。"
                     remainingWaterMl > 0 -> "继续保持，建议分多次补足剩余饮水。"
-                    remainingWaterMl == 0 -> "刚好完成今日饮水目标。"
+                    remainingWaterMl == 0.0 -> "刚好完成今日饮水目标。"
                     else -> "今日饮水已超过目标，保持舒适节奏即可。"
                 },
                 fontSize = 13.sp,
@@ -3935,13 +5471,13 @@ fun WaterSummaryCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                OutlinedButton(onClick = { onAddWater(100) }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) {
+                OutlinedButton(onClick = { onAddWater(100.0) }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) {
                     Text(text = "+100ml", fontSize = 12.sp)
                 }
-                OutlinedButton(onClick = { onAddWater(250) }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) {
+                OutlinedButton(onClick = { onAddWater(250.0) }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) {
                     Text(text = "+250ml", fontSize = 12.sp)
                 }
-                OutlinedButton(onClick = { onAddWater(500) }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) {
+                OutlinedButton(onClick = { onAddWater(500.0) }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) {
                     Text(text = "+500ml", fontSize = 12.sp)
                 }
             }
@@ -3956,7 +5492,7 @@ fun WaterSummaryCard(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "${record.amountMl} ml",
+                            text = "${formatNumber(record.amountMl)} ml",
                             modifier = Modifier.weight(1f),
                             fontSize = 14.sp,
                             color = Color(0xFF303747)
@@ -4221,18 +5757,19 @@ fun MonthSummaryCard(
     dailyPlanSelections: List<DailyPlanSelection>,
     exerciseBurnRecords: List<ExerciseBurnRecord>
 ) {
+    val today = currentDateText()
     val recordedMealDates = meals
         .map { it.date }
-        .filter { it.startsWith(visibleMonth) }
+        .filter { it.startsWith(visibleMonth) && it < today }
         .distinct()
     val totalDeficit = recordedMealDates.sumOf { date ->
         val plan = planForDate(date, plans, dailyPlanSelections)
-        val baseTargetCalories = plan?.targetCalories ?: 0
-        val exerciseCalories = exerciseBurnRecords.firstOrNull { it.date == date }?.calories ?: 0
+        val baseTargetCalories = plan?.targetCalories ?: 0.0
+        val exerciseCalories = exerciseBurnRecords.firstOrNull { it.date == date }?.calories ?: 0.0
         val adjustedTargetCalories = baseTargetCalories + exerciseCalories
         val consumedCalories = meals.filter { it.date == date }.sumOf { it.calories }
-        val actualDeficit = if (adjustedTargetCalories > 0) adjustedTargetCalories - consumedCalories else 0
-        (plan?.dailyCalorieDeficit ?: 0) + actualDeficit
+        val actualDeficit = if (adjustedTargetCalories > 0) adjustedTargetCalories - consumedCalories else 0.0
+        (plan?.dailyCalorieDeficit ?: 0.0) + actualDeficit
     }
     val estimatedFatKg = totalDeficit / 7700.0
     val fatText = String.format(Locale.getDefault(), "%.2f kg", estimatedFatKg)
@@ -4245,10 +5782,10 @@ fun MonthSummaryCard(
     ) {
         Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(text = "$visibleMonth 月度汇总", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color(0xFF161A23))
-            SummaryItem(label = "累计热量缺口", value = "${totalDeficit} kcal")
+            SummaryItem(label = "累计热量缺口", value = "${formatNumber(totalDeficit)} kcal")
             SummaryItem(label = "估算减少脂肪", value = fatText)
             Text(
-                text = "只统计有饮食记录的日期。按 1 kg 脂肪约等于 7700 kcal 估算；未达到计划会增加缺口，超出计划会抵消缺口。",
+                text = "只统计当前查看月份内、且早于今天并有饮食记录的日期。按 1 kg 脂肪约等于 7700 kcal 估算；未达到计划会增加缺口，超出计划会抵消缺口。",
                 fontSize = 13.sp,
                 color = Color(0xFF8A92A1)
             )
@@ -4276,32 +5813,54 @@ fun CalendarMonthCard(
         colors = CardDefaults.cardColors(containerColor = Color(0xCCFFFFFF)),
         elevation = CardDefaults.cardElevation(defaultElevation = 5.dp)
     ) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                weekLabels.forEach { label ->
-                    Text(
-                        text = label,
-                        modifier = Modifier.weight(1f),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF8A92A1)
-                    )
-                }
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val ultraCompact = maxWidth < 318.dp
+            val compact = maxWidth < 348.dp
+            val cardPadding = when {
+                ultraCompact -> 8.dp
+                compact -> 10.dp
+                else -> 14.dp
             }
-            calendarDays.chunked(7).forEach { week ->
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    week.forEach { date ->
-                        CalendarDayCell(
-                            date = date,
-                            visibleMonth = visibleMonth,
-                            selectedDate = selectedDate,
-                            meals = meals.filter { it.date == date },
-                            waterMl = waterRecords.filter { it.date == date }.sumOf { it.amountMl },
-                            exerciseCalories = exerciseBurnRecords.firstOrNull { it.date == date }?.calories ?: 0,
-                            targetCalories = targetCaloriesForDate(date, plans, dailyPlanSelections),
-                            onClick = { onSelectDate(date) },
-                            modifier = Modifier.weight(1f)
+            val gridSpacing = when {
+                ultraCompact -> 2.dp
+                compact -> 4.dp
+                else -> 6.dp
+            }
+            val weekFontSize = when {
+                ultraCompact -> 10.sp
+                compact -> 11.sp
+                else -> 12.sp
+            }
+            val contentSpacing = if (compact) 8.dp else 10.dp
+
+            Column(modifier = Modifier.padding(cardPadding), verticalArrangement = Arrangement.spacedBy(contentSpacing)) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(gridSpacing)) {
+                    weekLabels.forEach { label ->
+                        Text(
+                            text = label,
+                            modifier = Modifier.weight(1f),
+                            fontSize = weekFontSize,
+                            fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center,
+                            color = Color(0xFF8A92A1)
                         )
+                    }
+                }
+                calendarDays.chunked(7).forEach { week ->
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(gridSpacing)) {
+                        week.forEach { date ->
+                            CalendarDayCell(
+                                date = date,
+                                visibleMonth = visibleMonth,
+                                selectedDate = selectedDate,
+                                meals = meals.filter { it.date == date },
+                                waterMl = waterRecords.filter { it.date == date }.sumOf { it.amountMl },
+                                hasExerciseRecord = exerciseBurnRecords.any { it.date == date },
+                                targetCalories = targetCaloriesForDate(date, plans, dailyPlanSelections),
+                                onClick = { onSelectDate(date) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
                     }
                 }
             }
@@ -4315,9 +5874,9 @@ fun CalendarDayCell(
     visibleMonth: String,
     selectedDate: String,
     meals: List<MealRecord>,
-    waterMl: Int,
-    exerciseCalories: Int,
-    targetCalories: Int?,
+    waterMl: Double,
+    hasExerciseRecord: Boolean,
+    targetCalories: Double?,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -4327,7 +5886,7 @@ fun CalendarDayCell(
     val calories = meals.sumOf { it.calories }
     val hasMeal = meals.isNotEmpty()
     val hasWater = waterMl > 0
-    val hasExercise = exerciseCalories > 0
+    val hasExercise = hasExerciseRecord
     val statusColor = calorieStatusColor(calories, targetCalories)
     val backgroundColor = when {
         isSelected -> Color(0xFFE7F0FF)
@@ -4349,46 +5908,159 @@ fun CalendarDayCell(
         colors = CardDefaults.cardColors(containerColor = backgroundColor),
         border = BorderStroke(1.dp, borderColor)
     ) {
-        Column(
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(7.dp),
-            verticalArrangement = Arrangement.SpaceBetween
+                .padding(horizontal = 2.dp, vertical = 4.dp)
         ) {
-            Text(
-                text = date.takeLast(2).trimStart('0').ifBlank { "1" },
-                fontSize = 14.sp,
-                fontWeight = if (isSelected || isToday) FontWeight.Bold else FontWeight.SemiBold,
-                color = if (isCurrentMonth) Color(0xFF161A23) else Color(0xFFB4BBC8)
-            )
-            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                if (hasMeal) {
-                    Text(
-                        text = "$calories",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = statusColor
-                    )
-                } else {
-                    Text(text = " ", fontSize = 10.sp)
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                    CalendarDot(visible = hasMeal, color = Color(0xFF5B8DEF))
-                    CalendarDot(visible = hasWater, color = Color(0xFF29B6F6))
-                    CalendarDot(visible = hasExercise, color = Color(0xFFFF8A50))
+            val calorieText = formatNumber(calories)
+            val ultraCompact = maxWidth < 36.dp
+            val tinyCell = maxWidth < 39.dp
+            val compactCell = maxWidth < 44.dp
+            val dayFontSize = when {
+                ultraCompact -> 9.sp
+                tinyCell -> 10.sp
+                compactCell -> 12.sp
+                else -> 13.sp
+            }
+            val calorieFontSize = when {
+                calorieText.length >= 4 && ultraCompact -> 6.sp
+                calorieText.length >= 4 && tinyCell -> 6.5.sp
+                calorieText.length >= 4 -> 7.5.sp
+                ultraCompact -> 6.5.sp
+                tinyCell -> 7.sp
+                compactCell -> 8.sp
+                else -> 9.sp
+            }
+            val topBottomSpacing = if (ultraCompact) 0.dp else 1.dp
+            val calorieLineHeight = when {
+                ultraCompact -> 7.sp
+                tinyCell -> 8.sp
+                compactCell -> 9.sp
+                else -> 10.sp
+            }
+            val indicatorGap = if (ultraCompact) 1.dp else 2.dp
+            val indicatorHeight = when {
+                ultraCompact -> 11.dp
+                tinyCell -> 12.dp
+                compactCell -> 13.dp
+                else -> 14.dp
+            }
+            val indicatorDotSize = when {
+                ultraCompact -> 6.dp
+                tinyCell -> 6.5.dp
+                compactCell -> 7.dp
+                else -> 8.dp
+            }
+
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = date.takeLast(2).trimStart('0').ifBlank { "1" },
+                    modifier = Modifier.fillMaxWidth(),
+                    fontSize = dayFontSize,
+                    fontWeight = if (isSelected || isToday) FontWeight.Bold else FontWeight.SemiBold,
+                    textAlign = TextAlign.Center,
+                    color = if (isCurrentMonth) Color(0xFF161A23) else Color(0xFFB4BBC8)
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(topBottomSpacing)) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(if (ultraCompact) 11.dp else 13.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (hasMeal) {
+                            Text(
+                                text = calorieText,
+                                modifier = Modifier.fillMaxWidth(),
+                                fontSize = calorieFontSize,
+                                lineHeight = calorieLineHeight,
+                                fontWeight = FontWeight.Bold,
+                                color = statusColor,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Clip,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(indicatorGap),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CalendarIndicatorChip(
+                            label = "椋?",
+                            active = hasMeal,
+                            activeColor = Color(0xFF5B8DEF),
+                            height = indicatorHeight,
+                            dotSize = indicatorDotSize,
+                            modifier = Modifier.weight(1f)
+                        )
+                        CalendarIndicatorChip(
+                            label = "姘?",
+                            active = hasWater,
+                            activeColor = Color(0xFF12B5FF),
+                            height = indicatorHeight,
+                            dotSize = indicatorDotSize,
+                            modifier = Modifier.weight(1f)
+                        )
+                        CalendarIndicatorChip(
+                            label = "杩?",
+                            active = hasExercise,
+                            activeColor = Color(0xFFFF8A3D),
+                            height = indicatorHeight,
+                            dotSize = indicatorDotSize,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
                 }
             }
         }
     }
 }
 
+@Suppress("UNUSED_PARAMETER")
 @Composable
-fun CalendarDot(visible: Boolean, color: Color) {
+fun CalendarIndicatorChip(
+    label: String,
+    active: Boolean,
+    activeColor: Color,
+    height: androidx.compose.ui.unit.Dp,
+    dotSize: androidx.compose.ui.unit.Dp,
+    modifier: Modifier = Modifier
+) {
+    val containerColor = if (active) activeColor.copy(alpha = 0.12f) else Color(0xFFF2F5FA)
+    val dotColor = if (active) activeColor else Color(0xFFC9D3E2)
+    val dotBorderColor = if (active) activeColor.copy(alpha = 0.45f) else Color(0xFFB8C4D5)
+
+    Box(
+        modifier = modifier
+            .height(height)
+            .clip(RoundedCornerShape(10.dp))
+            .background(containerColor),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .size(dotSize)
+                .clip(CircleShape)
+                .background(dotColor)
+                .border(BorderStroke(1.dp, dotBorderColor), CircleShape)
+        )
+    }
+}
+
+@Composable
+fun CalendarDot(visible: Boolean, color: Color, size: androidx.compose.ui.unit.Dp = 7.dp) {
     Box(
         modifier = Modifier
-            .size(6.dp)
+            .size(size)
             .clip(CircleShape)
-            .background(if (visible) color else Color.Transparent)
+            .background(if (visible) color else Color(0xFFDDE3EF))
     )
 }
 
@@ -4439,9 +6111,9 @@ fun HistoryDateCard(
     date: String,
     isSelected: Boolean,
     meals: List<MealRecord>,
-    waterMl: Int,
+    waterMl: Double,
     planStatusText: String,
-    targetCalories: Int?,
+    targetCalories: Double?,
     onClick: () -> Unit
 ) {
     val calories = meals.sumOf { it.calories }
@@ -4467,7 +6139,7 @@ fun HistoryDateCard(
                     Text(text = "查看")
                 }
             }
-            Text(text = "$calories kcal · 蛋白${protein}g 脂肪${fat}g 碳水${carbs}g · 饮水${waterMl}ml", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF303747))
+            Text(text = "${formatNumber(calories)} kcal · 蛋白${formatNumber(protein)}g 脂肪${formatNumber(fat)}g 碳水${formatNumber(carbs)}g · 饮水${formatNumber(waterMl)}ml", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF303747))
         }
     }
 }
@@ -4553,7 +6225,7 @@ fun FoodQuickPickRow(
                 Text(text = food.name, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF161A23))
                 Spacer(modifier = Modifier.height(3.dp))
                 Text(
-                    text = "${food.calories} kcal · ${foodServingText(food)} · 碳水${food.carbs}g 蛋白${food.protein}g 脂肪${food.fat}g",
+                    text = "${formatNumber(food.calories)} kcal · ${foodServingText(food)} · 碳水${formatNumber(food.carbs)}g 蛋白${formatNumber(food.protein)}g 脂肪${formatNumber(food.fat)}g",
                     fontSize = 12.sp,
                     color = Color(0xFF8A92A1)
                 )
@@ -4583,9 +6255,9 @@ fun QuickAddFoodDialog(
     val food = selectedFood
     val quantity = quantityText.toDoubleOrNull() ?: 0.0
     val servingCount = food?.let { servingCountFromQuantity(quantity, it.servingType) } ?: 0.0
-    val previewProtein = food?.let { (it.protein * servingCount).toInt() } ?: 0
-    val previewFat = food?.let { (it.fat * servingCount).toInt() } ?: 0
-    val previewCarbs = food?.let { (it.carbs * servingCount).toInt() } ?: 0
+    val previewProtein = food?.let { roundOneDecimal(it.protein * servingCount) } ?: 0.0
+    val previewFat = food?.let { roundOneDecimal(it.fat * servingCount) } ?: 0.0
+    val previewCarbs = food?.let { roundOneDecimal(it.carbs * servingCount) } ?: 0.0
     val previewCalories = calculateCalories(previewProtein, previewFat, previewCarbs)
 
     AlertDialog(
@@ -4607,36 +6279,32 @@ fun QuickAddFoodDialog(
                         shape = RoundedCornerShape(14.dp)
                     ) {
                         Text(
-                            text = "${if (item == selectedFood) "✓ " else ""}${item.name} · ${item.calories} kcal/${foodServingText(item)}",
+                            text = "${if (item == selectedFood) "✓ " else ""}${item.name} · ${formatNumber(item.calories)} kcal/${foodServingText(item)}",
                             fontSize = 12.sp
                         )
                     }
                 }
                 if (food != null) {
                     AppTextField(
-                        label = if (food.servingType == ServingType.PerItem) "食物总量（个）" else "食物总量（克）",
+                        label = if (food.servingType == ServingType.PerItem) "食物总量（${food.unitLabel.ifBlank { "个" }}）" else "食物总量（克）",
                         value = quantityText,
                         onValueChange = { quantityText = it },
                         isNumber = true
                     )
                     Text(text = "标签", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF303747))
-                    tags.take(6).chunked(3).forEach { rowTags ->
+                    tags.take(7).chunked(3).forEach { rowTags ->
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             rowTags.forEach { tag ->
                                 OutlinedButton(
-                                    onClick = {
-                                        val existingTags = tagText
-                                            .split(";", "；", "\n")
-                                            .map { it.trim() }
-                                            .filter { it.isNotBlank() }
-                                        tagText = if (existingTags.contains(tag)) {
-                                            existingTags.filter { it != tag }.joinToString(";")
-                                        } else {
-                                            (existingTags + tag).distinct().joinToString(";")
-                                        }
-                                    },
-                                    modifier = Modifier.weight(1f),
-                                    shape = RoundedCornerShape(14.dp)
+                                onClick = {
+                                    val existingTags = tagText
+                                        .split(";", "；", "\n")
+                                        .map { it.trim() }
+                                        .filter { it.isNotBlank() }
+                                    tagText = toggleSelectableTag(existingTags, tag).joinToString(";")
+                                },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(14.dp)
                                 ) {
                                     val currentTags = tagText
                                         .split(";", "；", "\n")
@@ -4660,7 +6328,7 @@ fun QuickAddFoodDialog(
                         onValueChange = { tagText = it }
                     )
                     Text(
-                        text = "预计添加：$previewCalories kcal · 碳水${previewCarbs}g 蛋白${previewProtein}g 脂肪${previewFat}g",
+                        text = "预计添加：${formatNumber(previewCalories)} kcal · 碳水${formatNumber(previewCarbs)}g 蛋白${formatNumber(previewProtein)}g 脂肪${formatNumber(previewFat)}g",
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = Color(0xFF303747)
@@ -4679,6 +6347,7 @@ fun QuickAddFoodDialog(
                         .map { it.trim() }
                         .filter { it.isNotBlank() }
                         .distinct()
+                        .let(::normalizeSelectableTags)
                     when {
                         currentFood == null -> errorText = "请选择食物"
                         parsedQuantity <= 0.0 -> errorText = "请输入有效总量"
@@ -4735,6 +6404,7 @@ fun FoodLibraryCard(
     food: FoodItem,
     onUse: () -> Unit,
     onEdit: () -> Unit,
+    onHide: () -> Unit,
     onDelete: () -> Unit
 ) {
     Card(
@@ -4742,29 +6412,44 @@ fun FoodLibraryCard(
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(containerColor = Color(0xBFFFFFFF))
     ) {
-        Column(modifier = Modifier.padding(18.dp)) {
+        Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(text = food.name, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = Color(0xFF161A23))
+            Text(
+                text = "${food.category} · ${formatNumber(food.calories)} kcal · ${foodServingText(food)}",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color(0xFFEF5350)
+            )
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(text = food.name, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = Color(0xFF161A23))
-                    Spacer(modifier = Modifier.height(5.dp))
-                    Text(text = "${food.category} · ${food.calories} kcal · ${foodServingText(food)}", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFEF5350))
+                OutlinedButton(
+                    onClick = onEdit,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Text(text = "编辑", fontSize = 12.sp, maxLines = 1)
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onEdit, shape = RoundedCornerShape(14.dp)) {
-                        Text(text = "编辑", fontSize = 12.sp)
-                    }
-                    OutlinedButton(onClick = onDelete, shape = RoundedCornerShape(14.dp)) {
-                        Text(text = "删除", fontSize = 12.sp)
-                    }
+                OutlinedButton(
+                    onClick = onHide,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Text(text = "隐藏", fontSize = 12.sp, maxLines = 1)
+                }
+                OutlinedButton(
+                    onClick = onDelete,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Text(text = "删除", fontSize = 12.sp, maxLines = 1)
                 }
             }
             Spacer(modifier = Modifier.height(12.dp))
-            NutritionRow(label = "碳水", value = "${food.carbs} g", color = Color(0xFF66BB6A))
-            NutritionRow(label = "蛋白质", value = "${food.protein} g", color = Color(0xFF5B8DEF))
-            NutritionRow(label = "脂肪", value = "${food.fat} g", color = Color(0xFFFFA726))
+            NutritionRow(label = "碳水", value = "${formatNumber(food.carbs)} g", color = Color(0xFF66BB6A))
+            NutritionRow(label = "蛋白质", value = "${formatNumber(food.protein)} g", color = Color(0xFF5B8DEF))
+            NutritionRow(label = "脂肪", value = "${formatNumber(food.fat)} g", color = Color(0xFFFFA726))
             Spacer(modifier = Modifier.height(12.dp))
             Button(
                 onClick = onUse,
@@ -4793,9 +6478,9 @@ fun FoodUseDialog(
     var errorText by remember(food) { mutableStateOf<String?>(null) }
     val quantity = quantityText.toDoubleOrNull() ?: 0.0
     val servingCount = servingCountFromQuantity(quantity, food.servingType)
-    val previewProtein = (food.protein * servingCount).toInt()
-    val previewFat = (food.fat * servingCount).toInt()
-    val previewCarbs = (food.carbs * servingCount).toInt()
+    val previewProtein = roundOneDecimal(food.protein * servingCount)
+    val previewFat = roundOneDecimal(food.fat * servingCount)
+    val previewCarbs = roundOneDecimal(food.carbs * servingCount)
     val previewCalories = calculateCalories(previewProtein, previewFat, previewCarbs)
 
     AlertDialog(
@@ -4805,19 +6490,19 @@ fun FoodUseDialog(
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(text = food.name, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF161A23))
                 Text(
-                    text = "${foodServingText(food)}：${food.calories} kcal · 碳水${food.carbs}g 蛋白${food.protein}g 脂肪${food.fat}g",
+                    text = "${foodServingText(food)}：${formatNumber(food.calories)} kcal · 碳水${formatNumber(food.carbs)}g 蛋白${formatNumber(food.protein)}g 脂肪${formatNumber(food.fat)}g",
                     fontSize = 13.sp,
                     color = Color(0xFF6F7785)
                 )
                 AppTextField(
-                    label = if (food.servingType == ServingType.PerItem) "食物总量（个）" else "食物总量（克）",
+                        label = if (food.servingType == ServingType.PerItem) "食物总量（${food.unitLabel.ifBlank { "个" }}）" else "食物总量（克）",
                     value = quantityText,
                     onValueChange = onQuantityChange,
                     isNumber = true
                 )
                 Text(text = "标签", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF303747))
                 if (tags.isNotEmpty()) {
-                    tags.take(6).chunked(3).forEach { rowTags ->
+                    tags.take(7).chunked(3).forEach { rowTags ->
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -4830,11 +6515,7 @@ fun FoodUseDialog(
                                             .map { it.trim() }
                                             .filter { it.isNotBlank() }
                                         onTagTextChange(
-                                            if (existingTags.contains(tag)) {
-                                                existingTags.filter { it != tag }.joinToString(";")
-                                            } else {
-                                                (existingTags + tag).distinct().joinToString(";")
-                                            }
+                                            toggleSelectableTag(existingTags, tag).joinToString(";")
                                         )
                                     },
                                     modifier = Modifier.weight(1f),
@@ -4863,7 +6544,7 @@ fun FoodUseDialog(
                     onValueChange = onTagTextChange
                 )
                 Text(
-                    text = "预计添加：$previewCalories kcal · 碳水${previewCarbs}g 蛋白${previewProtein}g 脂肪${previewFat}g",
+                    text = "预计添加：${formatNumber(previewCalories)} kcal · 碳水${formatNumber(previewCarbs)}g 蛋白${formatNumber(previewProtein)}g 脂肪${formatNumber(previewFat)}g",
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = Color(0xFF303747)
@@ -4882,6 +6563,7 @@ fun FoodUseDialog(
                         .map { it.trim() }
                         .filter { it.isNotBlank() }
                         .distinct()
+                        .let(::normalizeSelectableTags)
                     if (parsedQuantity <= 0.0) {
                         errorText = if (food.servingType == ServingType.PerItem) "请输入有效个数" else "请输入有效克数"
                         return@Button
@@ -4912,10 +6594,11 @@ fun FoodEditorDialog(
     onSave: (FoodItem) -> Unit
 ) {
     var name by remember { mutableStateOf(initialFood.name) }
-    var carbs by remember { mutableStateOf(initialFood.carbs.toString()) }
-    var protein by remember { mutableStateOf(initialFood.protein.toString()) }
-    var fat by remember { mutableStateOf(initialFood.fat.toString()) }
+    var carbs by remember { mutableStateOf(formatNumber(initialFood.carbs)) }
+    var protein by remember { mutableStateOf(formatNumber(initialFood.protein)) }
+    var fat by remember { mutableStateOf(formatNumber(initialFood.fat)) }
     var servingType by remember { mutableStateOf(initialFood.servingType) }
+    var unitLabel by remember { mutableStateOf(initialFood.unitLabel.takeIf { it.isNotBlank() } ?: "个") }
     var category by remember { mutableStateOf(if (initialFood.category in defaultFoodCategories()) initialFood.category else "自定义") }
     var customCategory by remember { mutableStateOf(if (initialFood.category in defaultFoodCategories()) "" else initialFood.category) }
     var pendingType by remember { mutableStateOf<ServingType?>(null) }
@@ -4971,6 +6654,13 @@ fun FoodEditorDialog(
                     selectedCategory = category,
                     onSelectCategory = { category = it }
                 )
+                if (servingType == ServingType.PerItem) {
+                    AppTextField(
+                        label = "量词（可选，不填默认为个）",
+                        value = if (unitLabel == "个") "" else unitLabel,
+                        onValueChange = { unitLabel = it.trim().ifBlank { "个" } }
+                    )
+                }
                 if (category == "自定义") {
                     AppTextField(
                         label = "自定义分类名称",
@@ -4978,9 +6668,9 @@ fun FoodEditorDialog(
                         onValueChange = { customCategory = it }
                     )
                 }
-                AppTextField(label = "${servingTypeLabel(servingType)}碳水 g", value = carbs, onValueChange = { carbs = it }, isNumber = true)
-                AppTextField(label = "${servingTypeLabel(servingType)}蛋白质 g", value = protein, onValueChange = { protein = it }, isNumber = true)
-                AppTextField(label = "${servingTypeLabel(servingType)}脂肪 g", value = fat, onValueChange = { fat = it }, isNumber = true)
+                AppTextField(label = "${servingTypeLabel(servingType, unitLabel)}碳水 g", value = carbs, onValueChange = { carbs = it }, isNumber = true)
+                AppTextField(label = "${servingTypeLabel(servingType, unitLabel)}蛋白质 g", value = protein, onValueChange = { protein = it }, isNumber = true)
+                AppTextField(label = "${servingTypeLabel(servingType, unitLabel)}脂肪 g", value = fat, onValueChange = { fat = it }, isNumber = true)
                 errorText?.let {
                     Text(text = it, color = Color(0xFFEF5350), fontSize = 13.sp)
                 }
@@ -4989,9 +6679,9 @@ fun FoodEditorDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    val parsedCarbs = carbs.toIntOrNull()
-                    val parsedProtein = protein.toIntOrNull()
-                    val parsedFat = fat.toIntOrNull()
+                    val parsedCarbs = parseOneDecimal(carbs)
+                    val parsedProtein = parseOneDecimal(protein)
+                    val parsedFat = parseOneDecimal(fat)
 
                     if (name.isBlank()) {
                         errorText = "请输入食物名称"
@@ -5018,7 +6708,9 @@ fun FoodEditorDialog(
                             protein = parsedProtein,
                             fat = parsedFat,
                             servingType = servingType,
-                            category = finalCategory
+                            category = finalCategory,
+                            unitLabel = normalizedUnitLabel(servingType, unitLabel),
+                            isHidden = initialFood.isHidden
                         )
                     )
                 },
@@ -5075,12 +6767,80 @@ fun ConfirmDialog(
     )
 }
 
-fun calculateCalories(protein: Int, fat: Int, carbs: Int): Int {
-    return protein * 4 + fat * 9 + carbs * 4
+fun calculateCalories(protein: Double, fat: Double, carbs: Double): Double {
+    return roundOneDecimal(protein * 4 + fat * 9 + carbs * 4)
+}
+
+fun parseOneDecimal(text: String): Double? {
+    return text.trim().takeIf { it.isNotBlank() }?.toDoubleOrNull()?.let(::roundOneDecimal)
+}
+
+fun roundOneDecimal(value: Double): Double {
+    return kotlin.math.round(value * 10.0) / 10.0
+}
+
+fun formatNumber(value: Double): String {
+    val rounded = roundOneDecimal(value)
+    return if (kotlin.math.abs(rounded - rounded.toLong()) < 0.0001) {
+        rounded.toLong().toString()
+    } else {
+        String.format(Locale.getDefault(), "%.1f", rounded)
+    }
+}
+
+fun sanitizeOneDecimalInput(raw: String): String {
+    val normalized = raw.replace('，', '.')
+    val builder = StringBuilder()
+    var hasDecimalPoint = false
+    var decimalDigits = 0
+    normalized.forEach { char ->
+        when {
+            char.isDigit() && !hasDecimalPoint -> builder.append(char)
+            char.isDigit() && decimalDigits < 1 -> {
+                builder.append(char)
+                decimalDigits += 1
+            }
+            char == '.' && !hasDecimalPoint -> {
+                if (builder.isEmpty()) builder.append('0')
+                builder.append('.')
+                hasDecimalPoint = true
+            }
+        }
+    }
+    return builder.toString()
 }
 
 fun defaultFoodCategories(): List<String> {
     return listOf("主食", "肉蛋奶", "蔬菜", "水果", "饮品", "零食", "调味品", "自定义", "AI 识别")
+}
+
+fun defaultPresetFoods(): List<FoodItem> {
+    return listOf(
+        FoodItem(
+            name = "熟米饭",
+            servingType = ServingType.Per100g,
+            carbs = 25.9,
+            protein = 2.6,
+            fat = 0.3,
+            category = "主食"
+        ),
+        FoodItem(
+            name = "鸡蛋（全蛋）",
+            servingType = ServingType.PerItem,
+            carbs = 1.0,
+            protein = 6.6,
+            fat = 4.4,
+            category = "肉蛋奶"
+        ),
+        FoodItem(
+            name = "鸡蛋（蛋白）",
+            servingType = ServingType.PerItem,
+            carbs = 0.6,
+            protein = 3.5,
+            fat = 0.0,
+            category = "肉蛋奶"
+        )
+    )
 }
 
 fun preset(provider: String, baseUrl: String, model: String, vision: Boolean = true): AiSettings {
@@ -5504,6 +7264,112 @@ suspend fun testAiSettings(settings: AiSettings): String {
     }
 }
 
+suspend fun verifyAiSettings(settings: AiSettings): AiVerificationResult {
+    return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        withTransientAiRetry {
+            val availabilityResponse = requestAiCapabilityCheck(
+                settings = settings,
+                prompt = "请只回复 OK，用于检测模型是否可用。"
+            )
+            val visionResponse = requestAiCapabilityCheck(
+                settings = settings,
+                prompt = "请只回答 YES 或 NO：你当前这个模型是否支持图片识别，是否能在聊天消息中接收图片并理解图片内容？不要解释。"
+            )
+            val supportsVision = parseVisionSupportAnswer(visionResponse)
+            AiVerificationResult(
+                availabilityResponse = availabilityResponse,
+                supportsVision = supportsVision,
+                visionImageUploadFormat = if (supportsVision) requestVisionImageUploadFormat(settings) else VisionImageUploadFormat.Auto
+            )
+        }
+    }
+}
+
+fun requestAiCapabilityCheck(settings: AiSettings, prompt: String): String {
+    val requestUrl = normalizeAiBaseUrl(
+        settings.baseUrl,
+        providerLooksAnthropicLike(settings),
+        providerLooksGeminiLike(settings),
+        providerLooksZhipuLike(settings)
+    ) ?: throw IllegalStateException("AI 接口地址格式不正确，请到 AI 设置中重新填写 http/https 地址。")
+    val capabilityCheckSystemPrompt = "你是一个模型能力检测助手。严格按用户要求作答，不要输出多余内容。"
+    val payload = if (providerNeedsAnthropicVersion(settings)) {
+        buildAnthropicPayload(settings, prompt, systemPrompt = capabilityCheckSystemPrompt)
+    } else if (providerLooksZhipuLike(settings)) {
+        buildZhipuPayload(settings, prompt)
+    } else {
+        buildOpenAiCompatiblePayload(settings, prompt, systemPrompt = capabilityCheckSystemPrompt)
+    }
+    val connection = (URL(requestUrl).openConnection() as HttpURLConnection).apply {
+        requestMethod = "POST"
+        connectTimeout = 20000
+        readTimeout = 30000
+        doOutput = true
+        setRequestProperty("Content-Type", "application/json; charset=utf-8")
+        setRequestProperty("Authorization", "Bearer ${settings.apiKey}")
+        setRequestProperty("Connection", "close")
+        if (providerNeedsAnthropicVersion(settings)) {
+            setRequestProperty("x-api-key", settings.apiKey)
+            setRequestProperty("anthropic-version", "2023-06-01")
+        }
+    }
+    OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { writer ->
+        writer.write(payload)
+    }
+    val responseCode = connection.responseCode
+    val responseText = if (responseCode in 200..299) {
+        connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+    } else {
+        val errorBody = connection.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+        throw IllegalStateException("AI 请求失败：HTTP $responseCode ${errorBody.take(220)}")
+    }
+    return extractAiMessageContent(responseText).trim().ifBlank { responseText.trim() }
+}
+
+fun parseVisionSupportAnswer(answer: String): Boolean {
+    val normalized = answer
+        .replace("`", " ")
+        .replace("*", " ")
+        .trim()
+    val lowercase = normalized.lowercase(Locale.getDefault())
+    return when {
+        listOf("不支持图片", "不支持图像", "不支持图片识别", "不能识别图片", "无法识别图片", "仅文本", "纯文本", "不可以", "不是", "不行", "否").any { lowercase.contains(it) } -> false
+        Regex("\\b(no|false|unsupported|text-only|text only|cannot)\\b").containsMatchIn(lowercase) -> false
+        listOf("支持图片", "支持图像", "支持图片识别", "可以识别图片", "能识别图片", "可以接收图片", "能接收图片", "可以", "是").any { lowercase.contains(it) } -> true
+        Regex("\\b(yes|true|supported|support)\\b").containsMatchIn(lowercase) -> true
+        else -> throw IllegalStateException("模型没有明确回答是否支持图片识别，请重试。原始回答：${normalized.take(80)}")
+    }
+}
+
+fun requestVisionImageUploadFormat(settings: AiSettings): VisionImageUploadFormat {
+    val prompt = if (providerNeedsAnthropicVersion(settings)) {
+        "你现在作为图片识别模型工作时，接收图片应该使用哪一种上传格式？请只回复 ANTHROPIC_BASE64 或 UNSUPPORTED，不要解释。"
+    } else {
+        "你现在作为图片识别模型工作时，接收图片更适合哪一种上传格式？请只回复 IMAGE_URL_DATA_URL、IMAGE_URL_BASE64 或 UNSUPPORTED，不要解释。IMAGE_URL_DATA_URL 表示传完整的 data:image/...;base64,...，IMAGE_URL_BASE64 表示只传纯 base64 内容。"
+    }
+    val answer = requestAiCapabilityCheck(settings = settings, prompt = prompt)
+    return parseVisionImageUploadFormatAnswer(answer, settings)
+}
+
+fun parseVisionImageUploadFormatAnswer(answer: String, settings: AiSettings): VisionImageUploadFormat {
+    val normalized = answer
+        .replace("`", " ")
+        .replace("*", " ")
+        .trim()
+    val uppercase = normalized.uppercase(Locale.getDefault())
+    return when {
+        "ANTHROPIC_BASE64" in uppercase -> VisionImageUploadFormat.AnthropicBase64
+        "IMAGE_URL_BASE64" in uppercase -> VisionImageUploadFormat.ImageUrlBase64
+        "IMAGE_URL_DATA_URL" in uppercase -> VisionImageUploadFormat.ImageUrlDataUrl
+        listOf("DATA URL", "DATA_URL", "完整DATA", "完整DATAURL", "完整 BASE64 DATA URL").any { uppercase.contains(it) } ->
+            VisionImageUploadFormat.ImageUrlDataUrl
+        listOf("RAW BASE64", "纯BASE64", "原始BASE64").any { uppercase.contains(it) } ->
+            if (providerNeedsAnthropicVersion(settings)) VisionImageUploadFormat.AnthropicBase64 else VisionImageUploadFormat.ImageUrlBase64
+        Regex("\\b(UNSUPPORTED|UNKNOWN|AUTO)\\b").containsMatchIn(uppercase) -> settings.resolvedVisionImageUploadFormat()
+        else -> settings.resolvedVisionImageUploadFormat()
+    }
+}
+
 suspend fun fetchAiModelList(settings: AiSettings): List<String> {
     return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
         val requestUrl = modelListUrlFromBaseUrl(settings)
@@ -5649,7 +7515,12 @@ suspend fun requestAiMealRecognitionResponse(
             throw IllegalStateException("AI 请求失败：HTTP $responseCode ${errorBody.take(160)}")
         }
         val content = extractAiMessageContent(responseText)
-        val candidates = parseAiCandidatesFromText(content, foodName, servingType, proteinText.toIntOrNull() ?: 0, fatText.toIntOrNull() ?: 0, carbsText.toIntOrNull() ?: 0)
+        val parsedFallbackName = if (imageType == RecognitionImageType.NutritionLabel) {
+            foodName.ifBlank { "营养成分表食品" }
+        } else {
+            foodName
+        }
+        val candidates = parseAiCandidatesFromText(content, parsedFallbackName, servingType, parseOneDecimal(proteinText) ?: 0.0, parseOneDecimal(fatText) ?: 0.0, parseOneDecimal(carbsText) ?: 0.0)
             .ifEmpty { throw IllegalStateException("AI 返回内容无法解析为候选食物：${content.take(120)}") }
         AiRecognitionResponse(
             candidates = candidates,
@@ -5666,8 +7537,8 @@ suspend fun requestAiNutritionReport(
     plan: NutritionPlan?,
     meals: List<MealRecord>,
     exerciseBurnRecord: ExerciseBurnRecord?,
-    waterTargetMl: Int,
-    drunkWaterMl: Int
+    waterTargetMl: Double,
+    drunkWaterMl: Double
 ): String {
     return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
         withTransientAiRetry {
@@ -5715,7 +7586,7 @@ suspend fun requestAiExerciseCalories(
     settings: AiSettings,
     selectedDate: String,
     description: String
-): Int {
+): Double {
     return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
         withTransientAiRetry {
         val prompt = buildAiExerciseCaloriesPrompt(selectedDate, description)
@@ -5801,7 +7672,7 @@ suspend fun requestAiCandidateSummary(
             throw IllegalStateException("AI 请求失败：HTTP $responseCode ${errorBody.take(160)}")
         }
         val content = extractAiMessageContent(responseText)
-        parseAiCandidatesFromText(content, fallbackName, fallbackServingType, 0, 0, 0)
+        parseAiCandidatesFromText(content, fallbackName, fallbackServingType, 0.0, 0.0, 0.0)
             .firstOrNull()
             ?.copy(sourceName = "文字 AI 汇总结果")
             ?: throw IllegalStateException("文字生成工作 AI 返回内容无法解析为汇总结果：${content.take(120)}")
@@ -5814,28 +7685,37 @@ fun buildAiNutritionReportPrompt(
     plan: NutritionPlan?,
     meals: List<MealRecord>,
     exerciseBurnRecord: ExerciseBurnRecord?,
-    waterTargetMl: Int,
-    drunkWaterMl: Int
+    waterTargetMl: Double,
+    drunkWaterMl: Double
 ): String {
     val consumedCalories = meals.sumOf { it.calories }
     val consumedProtein = meals.sumOf { it.protein }
     val consumedFat = meals.sumOf { it.fat }
     val consumedCarbs = meals.sumOf { it.carbs }
-    val exerciseCalories = exerciseBurnRecord?.calories ?: 0
-    val adjustedTargetCalories = (plan?.targetCalories ?: 0) + exerciseCalories
-    val adjustedTargetProtein = (plan?.targetProtein ?: 0) + exerciseProteinGrams(exerciseCalories)
-    val adjustedTargetCarbs = (plan?.targetCarbs ?: 0) + exerciseCarbsGrams(exerciseCalories)
+    val exerciseCalories = exerciseBurnRecord?.calories ?: 0.0
+    val adjustedTargetCalories = (plan?.targetCalories ?: 0.0) + exerciseCalories
+    val adjustedTargetProtein = (plan?.targetProtein ?: 0.0) + exerciseProteinGrams(exerciseCalories)
+    val adjustedTargetCarbs = (plan?.targetCarbs ?: 0.0) + exerciseCarbsGrams(exerciseCalories)
     val mealLines = meals.joinToString("\n") { meal ->
-        "- ${meal.time} ${meal.name} ${meal.calories}kcal 碳水${meal.carbs}g 蛋白${meal.protein}g 脂肪${meal.fat}g 标签:${meal.tags.joinToString("/")}"
+        "- ${meal.time} ${meal.name} ${formatNumber(meal.calories)}kcal 碳水${formatNumber(meal.carbs)}g 蛋白${formatNumber(meal.protein)}g 脂肪${formatNumber(meal.fat)}g 标签:${meal.tags.joinToString("/")}"
     }.ifBlank { "暂无饮食记录" }
     return """
 你是一个谨慎的营养建议助手。请根据当天记录生成中文营养报告。
 要求：
 1. 不要输出 Markdown 表格。
-2. 分为：今日判断、接下来怎么吃、饮水建议、注意事项。
-3. 建议要具体到食物类型，例如优先补充什么、少吃什么。
-4. 不要给医疗诊断，只做日常饮食建议。
-5. 控制在 250 字以内。
+2. 按以下顺序输出：今日总评、宏量营养分析、食物质量分析、微量营养与膳食纤维估算、接下来怎么吃、饮水建议、注意事项。
+3. 宏量营养分析里要判断蛋白质、脂肪、碳水是否大致达标，并分析分配是否合理。
+4. 食物质量分析里必须判断：
+   - 蛋白质来源是否优质，是否偏向鸡蛋、奶、瘦肉、鱼虾、大豆制品，还是主要来自零散低质量来源。
+   - 脂肪来源是否较好，是否偏油炸、肥肉、奶茶、酱料、加工零食，是否存在饱和脂肪偏高风险。
+   - 碳水来源更偏粗杂粮、薯类、豆类、全谷物，还是偏白米饭、白面、甜点、含糖饮料等精制碳水。
+5. 微量营养与膳食纤维估算里，必须根据食物名称、常见食材组合、份量和烹饪方式，估算当天膳食纤维以及常见矿物质摄入情况，至少分析：钠、钾、钙、镁、铁、锌。
+6. 微量营养和膳食纤维无法精准计算时，也要明确写“估算”，并结合常见食材来源判断可能偏多、一般、偏少。
+7. 要分析食物多样性，指出蔬菜、水果、奶类、豆制品、全谷杂豆、坚果、海产品等是否明显不足或偏少。
+8. 建议要具体到食物类型和替换方案，例如“下一餐补一份深色蔬菜+一盒牛奶”这种级别，不要只说“均衡饮食”。
+9. 所有营养建议与估算都要尽量参考《中国居民膳食指南》，口径保持日常、稳妥、不过度极端。
+10. 不要给医疗诊断，只做日常饮食建议。
+11. 控制在约 500 到 900 字，信息要详细，但不要空泛重复。
 
 日期：$selectedDate
 计划：${plan?.name ?: "未选择计划"}
@@ -5853,9 +7733,21 @@ fun buildAiExerciseCaloriesPrompt(selectedDate: String, description: String): St
     return """
 你是一个谨慎的运动热量估算助手。请根据用户描述估算当天额外运动消耗热量。
 只返回 JSON 对象，不要返回 Markdown。
-字段：calories, note。
-calories 必须是整数 kcal，表示运动额外消耗，不要包含基础代谢。
-如果描述不完整，请给保守估计，并在 note 里说明不确定性。
+字段：calories, intensity, durationMinutes, exerciseCaloriesMin, exerciseCaloriesMax, epocCalories, note。
+其中：
+- intensity 表示你判断的运动强度，例如“低强度 / 中等强度 / 中高强度 / 高强度”。
+- durationMinutes 表示你推断的总运动时长，单位分钟。
+- exerciseCaloriesMin / exerciseCaloriesMax 表示按该运动强度和时长推算出的“运动过程本身”的合理热量消耗区间，不含基础代谢。
+- epocCalories 表示运动后过量氧耗（EPOC）带来的额外热量消耗估算，静态拉伸、散步等低强度活动可接近 0；高强度有氧、间歇训练、较扎实的力量训练可适当加入，但不要夸张。
+- calories 必须是最终采用的整数 kcal，表示“运动过程本身消耗 + EPOC”的总额外消耗，不包含基础代谢。
+工作流程必须严格按下面步骤执行：
+1. 先根据描述判断运动类型、运动强度、时长，必要时保守补全缺失信息。
+2. 再按该强度和时长估算运动过程本身的合理热量消耗区间 exerciseCaloriesMin 到 exerciseCaloriesMax。
+3. 然后单独估算 epocCalories。
+4. 最后计算 calories，并检查它是否与前面的区间和 EPOC 一致：calories 应大致落在“exerciseCaloriesMin + epocCalories”到“exerciseCaloriesMax + epocCalories”附近。
+5. 如果前后对不上，必须重新计算，直到最终 calories 与前面的强度判断、区间估算、EPOC 估算彼此一致。
+6. note 里简短说明你的强度判断依据、区间判断依据、是否计入 EPOC，以及有哪些不确定性。
+7. 如果描述不完整，请给保守估计，并在 note 里说明不确定性。
 如果明显不是运动描述，calories 返回 0。
 
 日期：$selectedDate
@@ -5872,7 +7764,7 @@ fun buildAiCandidateSummaryPrompt(candidates: List<RecognizedFoodCandidate>, foo
 分类：${candidate.food.category}
 记录方式：${candidate.food.servingType.name}
 建议数量：${formatServingCount(candidate.quantity)}
-每份/每100g营养：热量${candidate.food.calories}kcal 蛋白${candidate.food.protein}g 脂肪${candidate.food.fat}g 碳水${candidate.food.carbs}g
+每份/每100g营养：热量${formatNumber(candidate.food.calories)}kcal 蛋白${formatNumber(candidate.food.protein)}g 脂肪${formatNumber(candidate.food.fat)}g 碳水${formatNumber(candidate.food.carbs)}g
 置信度：${candidate.confidence}
 说明：${candidate.note}
 标签：${candidate.tags.joinToString("/")}
@@ -5881,11 +7773,15 @@ fun buildAiCandidateSummaryPrompt(candidates: List<RecognizedFoodCandidate>, foo
     return """
 你是一个谨慎的营养记录汇总助手。下面是多个图片识别 AI 对同一张食物图片给出的候选结果。
 请综合这些结果，生成 1 个最终建议结果。不要机械平均明显离谱的数值，要解释你采用哪些结果、忽略哪些不确定点。
+如果需要做营养估算、分类归纳或份量判断，请尽量参考《中国居民膳食指南》，采用保守、日常的口径。
+必须返回 protein、fat、carbs 三项营养素，不能省略、不能留空、不能只给热量；如果不确定，也要给出保守估算并在 note 说明依据。
 只返回 JSON 数组，数组里只放 1 个对象，不要返回 Markdown。
 字段：name, category, servingType, quantity, protein, fat, carbs, confidence, note, tags。
 servingType 只能是 PerItem 或 Per100g。
 protein/fat/carbs 表示每个或每100g的克数。
 quantity 必须估算这道菜可食用部分的总量；如果 servingType 是 Per100g，quantity 用克数；不要在没有依据时默认 100g。
+如果用户没有明确描述吃了哪些部分，请只计算实际可食用部分，不要把骨头、鱼刺、虾壳、蟹壳、贝壳、包装、明显剩下的汤汁、锅底、装饰性不可食用部分算进去。
+如果图片里有带骨肉类、整鱼、汤面、麻辣烫、火锅、砂锅、带壳海鲜等，请默认按保守可食用部分估算，并在 note 简短说明是否已排除骨头、壳、汤汁等非实际入口部分。
 用户已知菜名：${foodName.ifBlank { "未填写" }}
 用户补充描述：${foodDescription.ifBlank { "未填写" }}
 
@@ -5905,18 +7801,44 @@ fun buildAiMealRecognitionPrompt(
     hasImage: Boolean = false,
     imageType: RecognitionImageType = RecognitionImageType.FoodPhoto
 ): String {
-    val sourceText = if (hasImage) {
-        if (imageType == RecognitionImageType.NutritionLabel) {
-            "请优先根据用户上传的营养成分表直接读取营养素数值，按表格原文提取，不要按食物照片去估算。"
-        } else {
-            "请优先根据用户上传的食物图片识别食物类型、可见份量和营养素；用户填写的菜名和补充描述是强线索，可用于避免瞎猜。"
-        }
+    return if (hasImage && imageType == RecognitionImageType.NutritionLabel) {
+        """
+你是一个营养成分表 OCR 读取助手。请直接读取用户上传图片中的营养成分表，不要把它当食物照片估算。
+只返回 JSON 数组，数组里优先放 1 个对象，不要返回 Markdown，不要解释。
+字段：name, category, servingType, quantity, protein, fat, carbs, confidence, note, tags。
+规则：
+1. protein/fat/carbs 只填表里直接写出的数值，单位都是 g。
+2. 如果表里有“每100g/每100毫升”，优先用它，servingType=Per100g，quantity=100。
+3. 如果表里只有“每份/每包/每瓶/每个”，servingType=PerItem，quantity=1。
+4. 不要根据包装正面宣传语、口味名或食物照片外观去猜营养。
+5. 如果某项在表里看不清或没写，就保守填写 0，并在 note 说明哪一项不清楚。
+6. 如果 name 无法确定，可用用户输入名称；若用户也没填，就写“营养成分表食品”。
+7. category 尽量使用：主食、肉蛋奶、蔬菜、水果、饮品、零食、调味品、自定义、AI 识别。
+8. note 请简短说明你读的是“每100g”还是“每份”，以及是否有模糊字段。
+9. 如果图片信息不足、必须补充保守判断时，口径尽量参考《中国居民膳食指南》。
+10. 必须返回 protein、fat、carbs 三项；不要只返回热量或只写在说明文字里。
+
+用户输入：
+foodName: ${foodName.ifBlank { "未填写" }}
+foodDescription: ${foodDescription.ifBlank { "未填写" }}
+servingType: ${servingType.name}
+quantity: ${quantityText.ifBlank { "未填写" }}
+inputMode: ${inputMode.name}
+carbs: ${carbsText.ifBlank { "0" }}
+protein: ${proteinText.ifBlank { "0" }}
+fat: ${fatText.ifBlank { "0" }}
+""".trimIndent()
     } else {
-        "请根据用户手动输入的食物信息生成候选饮食记录。"
-    }
-    return """
+        val sourceText = if (hasImage) {
+            "请优先根据用户上传的食物图片识别食物类型、可见份量和营养素；用户填写的菜名和补充描述是强线索，可用于避免瞎猜。"
+        } else {
+            "请根据用户手动输入的食物信息生成候选饮食记录。"
+        }
+        """
 你是一个营养记录助手。$sourceText
 生成 1 到 3 个候选饮食记录。
+所有营养估算、食物分类和份量判断都要尽量参考《中国居民膳食指南》，采用保守、日常、不过度夸张的口径。
+必须返回 protein、fat、carbs 三项营养素，不能省略、不能留空、不能只给热量；如果不确定，也要根据常见做法给出保守估算，并在 note 说明依据。
 只返回 JSON 数组，不要返回 Markdown。
 字段：name, category, servingType, quantity, protein, fat, carbs, confidence, note, tags。
 category 只能尽量使用：主食、肉蛋奶、蔬菜、水果、饮品、零食、调味品、自定义、AI 识别。
@@ -5924,7 +7846,8 @@ servingType 只能是 PerItem 或 Per100g。
 营养素 protein/fat/carbs 表示每个或每100g的克数。
 quantity 必须估算这道菜可食用部分的总量：如果 servingType 是 Per100g，quantity 用克数；如果 servingType 是 PerItem，quantity 用个数。
 如果用户没有填写总量，也要根据图片餐盘、容器、食物形态和用户描述估算，不要默认 100g。
-如果来自营养成分表，请优先输出表里原本写明的每份或每100g数值；若两者都有，以更适合记录的标准项为准。
+如果用户没有详细描述自己实际吃了哪些部分，请默认只计算实际可食用部分，不要把骨头、鱼刺、虾壳、蟹壳、贝壳、明显没喝掉的汤汁、锅底、垫底配料、装饰性不可食用部分算进去。
+带骨鸡鸭鱼肉、整鱼、排骨、鸡翅、汤面、麻辣烫、火锅、砂锅、带壳海鲜这类场景，要优先按“实际入口部分”保守估算；如果做了这种排除，请在 note 里简短写明。
 如果来自图片，请在 note 中说明菜名/描述/画面分别对判断的影响，以及总量估算依据。
 
 用户输入：
@@ -5937,16 +7860,26 @@ carbs: ${carbsText.ifBlank { "0" }}
 protein: ${proteinText.ifBlank { "0" }}
 fat: ${fatText.ifBlank { "0" }}
 """.trimIndent()
+    }
 }
 
-fun buildOpenAiCompatiblePayload(settings: AiSettings, prompt: String, imageDataUrl: String? = null): String {
+fun buildOpenAiCompatiblePayload(
+    settings: AiSettings,
+    prompt: String,
+    imageDataUrl: String? = null,
+    systemPrompt: String = "你是专业但谨慎的营养记录助手，必须只输出 JSON。涉及营养估算、饮食建议或食物判断时，要尽量参考《中国居民膳食指南》。"
+): String {
     val userContent = if (imageDataUrl.isNullOrBlank()) {
         "\"${prompt.escapeJson()}\""
     } else {
+        val imageUrlValue = when (settings.resolvedVisionImageUploadFormat()) {
+            VisionImageUploadFormat.ImageUrlBase64 -> imageDataUrl.substringAfter("base64,", imageDataUrl)
+            else -> imageDataUrl
+        }
         """
 [
       {"type": "text", "text": "${prompt.escapeJson()}"},
-      {"type": "image_url", "image_url": {"url": "${imageDataUrl.escapeJson()}"}}
+      {"type": "image_url", "image_url": {"url": "${imageUrlValue.escapeJson()}"}}
     ]
 """.trimIndent()
     }
@@ -5961,7 +7894,7 @@ fun buildOpenAiCompatiblePayload(settings: AiSettings, prompt: String, imageData
   "model": "${settings.modelName.escapeJson()}",
 ${temperatureLine}${maxTokensLine}  "stream": false,
   "messages": [
-    {"role": "system", "content": "你是专业但谨慎的营养记录助手，必须只输出 JSON。"},
+    {"role": "system", "content": "${systemPrompt.escapeJson()}"},
     {"role": "user", "content": $userContent}
   ]
 }
@@ -5972,7 +7905,10 @@ fun buildZhipuPayload(settings: AiSettings, prompt: String, imageDataUrl: String
     val userContent = if (imageDataUrl.isNullOrBlank()) {
         "\"${prompt.escapeJson()}\""
     } else {
-        val imagePayload = imageDataUrl.substringAfter("base64,", imageDataUrl)
+        val imagePayload = when (settings.resolvedVisionImageUploadFormat()) {
+            VisionImageUploadFormat.ImageUrlDataUrl -> imageDataUrl
+            else -> imageDataUrl.substringAfter("base64,", imageDataUrl)
+        }
         """
 [
       {"type": "image_url", "image_url": {"url": "${imagePayload.escapeJson()}"}},
@@ -5996,7 +7932,12 @@ ${temperatureLine}  "stream": false,
 """.trimIndent()
 }
 
-fun buildAnthropicPayload(settings: AiSettings, prompt: String, imageDataUrl: String? = null): String {
+fun buildAnthropicPayload(
+    settings: AiSettings,
+    prompt: String,
+    imageDataUrl: String? = null,
+    systemPrompt: String = "你是专业但谨慎的营养记录助手。涉及营养估算、饮食建议或食物判断时，要尽量参考《中国居民膳食指南》。"
+): String {
     val imageContent = if (imageDataUrl.isNullOrBlank()) {
         ""
     } else {
@@ -6010,7 +7951,7 @@ fun buildAnthropicPayload(settings: AiSettings, prompt: String, imageDataUrl: St
 {
   "model": "${settings.modelName.escapeJson()}",
   "max_tokens": 800,
-  "system": "你是专业但谨慎的营养记录助手。",
+  "system": "${systemPrompt.escapeJson()}",
   "messages": [
     {
       "role": "user",
@@ -6043,28 +7984,45 @@ fun parseAiCandidatesFromText(
     text: String,
     fallbackName: String,
     fallbackServingType: ServingType,
-    fallbackProtein: Int,
-    fallbackFat: Int,
-    fallbackCarbs: Int
+    fallbackProtein: Double,
+    fallbackFat: Double,
+    fallbackCarbs: Double
 ): List<RecognizedFoodCandidate> {
     val cleanedText = cleanAiJsonText(text)
     return extractCandidateJsonObjects(cleanedText).mapNotNull { json ->
         val name = extractJsonStringAny(json, "name", "foodName", "food", "title", "食物", "名称", "食物名称")
             ?: fallbackName.takeIf { it.isNotBlank() }
-            ?: return@mapNotNull null
-        val proteinValue = extractJsonNumberAny(json, "protein", "protein_g", "proteinGram", "蛋白", "蛋白质")
-        val fatValue = extractJsonNumberAny(json, "fat", "fat_g", "fatGram", "脂肪")
-        val carbsValue = extractJsonNumberAny(json, "carbs", "carbohydrate", "carbohydrates", "carbs_g", "碳水", "碳水化合物")
-        if (proteinValue == null && fatValue == null && carbsValue == null && fallbackProtein == 0 && fallbackFat == 0 && fallbackCarbs == 0) {
+            ?: "营养成分表食品"
+        val proteinValue = extractJsonNumberAny(
+            json,
+            "protein", "protein_g", "proteinGram", "proteinPer100g", "proteinPerServing",
+            "proteins", "蛋白", "蛋白质", "每100g蛋白质", "每份蛋白质"
+        )
+        val fatValue = extractJsonNumberAny(
+            json,
+            "fat", "fat_g", "fatGram", "fatPer100g", "fatPerServing",
+            "totalFat", "脂肪", "总脂肪", "每100g脂肪", "每份脂肪"
+        )
+        val carbsValue = extractJsonNumberAny(
+            json,
+            "carbs", "carbohydrate", "carbohydrates", "carbs_g", "carbohydrate_g",
+            "carbsPer100g", "carbsPerServing", "碳水", "碳水化合物", "总碳水化合物", "每100g碳水", "每份碳水"
+        )
+        if (proteinValue == null && fatValue == null && carbsValue == null && fallbackProtein == 0.0 && fallbackFat == 0.0 && fallbackCarbs == 0.0) {
             return@mapNotNull null
         }
         val category = extractJsonStringAny(json, "category", "分类", "类别") ?: suggestFoodCategory(name)
-        val servingTypeText = extractJsonStringAny(json, "servingType", "serving_type", "记录方式", "计量方式")
+        val servingTypeText = extractJsonStringAny(json, "servingType", "serving_type", "记录方式", "计量方式", "basis", "单位", "营养基准")
         val type = parseServingType(servingTypeText) ?: fallbackServingType
-        val quantity = extractJsonNumberAny(json, "quantity", "totalQuantity", "estimatedQuantity", "amount", "weight", "grams", "totalWeight", "estimatedWeight", "建议数量", "数量", "总量", "重量", "估算重量") ?: if (type == ServingType.PerItem) 1.0 else 100.0
-        val protein = proteinValue?.toInt() ?: fallbackProtein
-        val fat = fatValue?.toInt() ?: fallbackFat
-        val carbs = carbsValue?.toInt() ?: fallbackCarbs
+        val quantity = extractJsonNumberAny(
+            json,
+            "quantity", "totalQuantity", "estimatedQuantity", "amount", "weight", "grams",
+            "totalWeight", "estimatedWeight", "servingSize", "serving_size", "netWeight", "netContent",
+            "packageWeight", "建议数量", "数量", "总量", "重量", "估算重量", "每份", "每包", "净含量"
+        ) ?: if (type == ServingType.PerItem) 1.0 else 100.0
+        val protein = proteinValue?.let(::roundOneDecimal) ?: fallbackProtein
+        val fat = fatValue?.let(::roundOneDecimal) ?: fallbackFat
+        val carbs = carbsValue?.let(::roundOneDecimal) ?: fallbackCarbs
         val confidence = extractJsonNumberAny(json, "confidence", "置信度") ?: 0.65
         val note = extractJsonStringAny(json, "note", "reason", "explanation", "说明", "备注") ?: "AI 返回候选结果，请确认后使用"
         val tags = extractJsonStringArrayAny(json, "tags", "标签").ifEmpty { suggestMealTags(name, calculateCalories(protein, fat, carbs), protein, fat, carbs) }
@@ -6125,17 +8083,39 @@ fun extractCandidateJsonObjects(text: String): List<String> {
 fun parseServingType(raw: String?): ServingType? {
     val value = raw?.lowercase(Locale.getDefault()).orEmpty()
     return when {
-        value.contains("peritem") || value.contains("item") || value.contains("个") || value.contains("份") -> ServingType.PerItem
+        value.contains("peritem") || value.contains("item") || value.contains("个") || value.contains("份") || value.contains("包") || value.contains("瓶") || value.contains("支") || value.contains("袋") -> ServingType.PerItem
         value.contains("per100g") || value.contains("100g") || value.contains("每100") || value.contains("克") -> ServingType.Per100g
         else -> null
     }
 }
 
+fun selectBestRecognizedFoodCandidate(
+    candidates: List<RecognizedFoodCandidate>,
+    fallbackName: String
+): RecognizedFoodCandidate {
+    val best = candidates.maxByOrNull { candidate ->
+        var score = candidate.confidence * 100.0
+        if (candidate.food.name.isNotBlank()) score += 8.0
+        if (candidate.food.protein > 0) score += 6.0
+        if (candidate.food.fat > 0) score += 6.0
+        if (candidate.food.carbs > 0) score += 6.0
+        if (candidate.food.servingType == ServingType.Per100g) score += 4.0
+        if (candidate.quantity > 0) score += 3.0
+        if (candidate.note.contains("每100", ignoreCase = true) || candidate.note.contains("每份", ignoreCase = true) || candidate.note.contains("营养成分表")) score += 4.0
+        score
+    } ?: candidates.first()
+    return best.copy(
+        food = best.food.copy(name = best.food.name.ifBlank { fallbackName }),
+        note = "自动优先选择了最像直接读取营养成分表的一条结果。${best.note}",
+        sourceName = "自动优选结果"
+    )
+}
+
 fun averageRecognizedFoodCandidate(candidates: List<RecognizedFoodCandidate>): RecognizedFoodCandidate {
     val first = candidates.first()
-    val averageProtein = candidates.map { it.food.protein }.average().toInt()
-    val averageFat = candidates.map { it.food.fat }.average().toInt()
-    val averageCarbs = candidates.map { it.food.carbs }.average().toInt()
+    val averageProtein = roundOneDecimal(candidates.map { it.food.protein }.average())
+    val averageFat = roundOneDecimal(candidates.map { it.food.fat }.average())
+    val averageCarbs = roundOneDecimal(candidates.map { it.food.carbs }.average())
     val averageQuantity = candidates.map { it.quantity }.average()
     val averageConfidence = candidates.map { it.confidence }.average().coerceIn(0.0, 1.0)
     val dominantServingType = candidates
@@ -6179,7 +8159,23 @@ fun extractJsonStringAny(json: String, vararg keys: String): String? {
 }
 
 fun extractJsonNumber(json: String, key: String): Double? {
-    return Regex("\\\"$key\\\"\\s*:\\s*\\\"?(-?\\d+(?:\\.\\d+)?)\\\"?").find(json)?.groupValues?.getOrNull(1)?.toDoubleOrNull()
+    val escapedKey = Regex.escape(key)
+    val directNumber = Regex("\\\"$escapedKey\\\"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)").find(json)?.groupValues?.getOrNull(1)?.toDoubleOrNull()
+    if (directNumber != null) return directNumber
+    val quotedNumber = Regex("\\\"$escapedKey\\\"\\s*:\\s*\\\"([^\\\"]*)\\\"")
+        .find(json)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.let { raw ->
+            Regex("-?\\d+(?:\\.\\d+)?").find(raw.replace(",", ""))?.value?.toDoubleOrNull()
+        }
+    if (quotedNumber != null) return quotedNumber
+    val nestedObjectNumber = Regex(
+        "\\\"$escapedKey\\\"\\s*:\\s*\\{[^{}]{0,160}?\\\"(?:value|amount|grams|gram|g|number|估算值|数值)\\\"\\s*:\\s*\\\"?(-?\\d+(?:\\.\\d+)?)",
+        setOf(RegexOption.DOT_MATCHES_ALL)
+    ).find(json)?.groupValues?.getOrNull(1)?.toDoubleOrNull()
+    if (nestedObjectNumber != null) return nestedObjectNumber
+    return null
 }
 
 fun extractJsonNumberAny(json: String, vararg keys: String): Double? {
@@ -6195,20 +8191,24 @@ fun extractJsonStringArrayAny(json: String, vararg keys: String): List<String> {
     return keys.firstNotNullOfOrNull { key -> extractJsonStringArray(json, key).takeIf { it.isNotEmpty() } }.orEmpty()
 }
 
-fun parseExerciseCaloriesFromText(text: String): Int? {
+fun parseExerciseCaloriesFromText(text: String): Double? {
     val cleanedText = cleanAiJsonText(text)
     val json = extractCandidateJsonObjects(cleanedText).firstOrNull() ?: cleanedText
-    return extractJsonNumberAny(json, "calories", "kcal", "exerciseCalories", "burnedCalories", "消耗", "热量消耗")
-        ?.toInt()
-        ?.coerceIn(0, 3000)
+    return extractJsonNumberAny(
+        json,
+        "calories", "finalCalories", "totalCalories", "calories_final", "kcal",
+        "exerciseCalories", "burnedCalories", "消耗", "热量消耗"
+    )
+        ?.let(::roundOneDecimal)
+        ?.coerceIn(0.0, 3000.0)
 }
 
-fun exerciseCarbsGrams(exerciseCalories: Int): Int {
-    return kotlin.math.round(exerciseCalories.coerceAtLeast(0) * 0.85 / 4.0).toInt()
+fun exerciseCarbsGrams(exerciseCalories: Double): Double {
+    return roundOneDecimal(exerciseCalories.coerceAtLeast(0.0) * 0.85 / 4.0)
 }
 
-fun exerciseProteinGrams(exerciseCalories: Int): Int {
-    return kotlin.math.round(exerciseCalories.coerceAtLeast(0) * 0.15 / 4.0).toInt()
+fun exerciseProteinGrams(exerciseCalories: Double): Double {
+    return roundOneDecimal(exerciseCalories.coerceAtLeast(0.0) * 0.15 / 4.0)
 }
 
 fun String.decodeJsonString(): String {
@@ -6237,13 +8237,6 @@ fun String.unescapeJsonString(): String {
         .replace("\\\"", "\"")
         .replace("\\/", "/")
         .replace("\\\\", "\\")
-}
-
-fun imageDataUrlFromUri(context: Context, uri: Uri): String? {
-    val bitmap = context.contentResolver.openInputStream(uri)?.use { inputStream ->
-        BitmapFactory.decodeStream(inputStream)
-    } ?: return null
-    return bitmapToJpegDataUrl(bitmap)
 }
 
 fun loadSponsorEntryBitmap(context: Context): Bitmap? {
@@ -6315,6 +8308,306 @@ fun openUrl(context: Context, url: String) {
     context.startActivity(intent)
 }
 
+@Composable
+fun ImageCropDialog(
+    bitmap: Bitmap,
+    imageType: RecognitionImageType,
+    sourceLabel: String?,
+    onDismiss: () -> Unit,
+    onUseOriginal: (Bitmap) -> Unit,
+    onConfirmCrop: (Bitmap) -> Unit
+) {
+    val density = LocalDensity.current
+    var containerSize by remember(bitmap, imageType) { mutableStateOf(IntSize.Zero) }
+    var scale by remember(bitmap, imageType) { mutableStateOf(1f) }
+    var offset by remember(bitmap, imageType) { mutableStateOf(Offset.Zero) }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFFFDFBFF))
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(text = "截取识别区域", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color(0xFF161A23))
+                Text(
+                    text = sourceLabel?.let { "$it，可先拖动和缩放，再确认截取。" } ?: "可先拖动和缩放，再确认截取。",
+                    fontSize = 12.sp,
+                    color = Color(0xFF6F7785)
+                )
+                BoxWithConstraints(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(if (imageType == RecognitionImageType.NutritionLabel) 0.82f else 1f)
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(Color(0xFF11151D))
+                ) {
+                    val viewportWidthPx = with(density) { maxWidth.toPx() }
+                    val viewportHeightPx = with(density) { maxHeight.toPx() }
+                    val cropScaleFactor = if (imageType == RecognitionImageType.NutritionLabel) 0.82f else 0.78f
+                    val cropWidthPx = viewportWidthPx * cropScaleFactor
+                    val cropHeightPx = if (imageType == RecognitionImageType.NutritionLabel) cropWidthPx / 0.82f else cropWidthPx
+                    val baseImageSize = fittedImageSize(
+                        bitmapWidth = bitmap.width.toFloat(),
+                        bitmapHeight = bitmap.height.toFloat(),
+                        containerWidth = viewportWidthPx,
+                        containerHeight = viewportHeightPx
+                    )
+                    val minScale = max(
+                        1f,
+                        max(
+                            cropWidthPx / baseImageSize.width.coerceAtLeast(1f),
+                            cropHeightPx / baseImageSize.height.coerceAtLeast(1f)
+                        )
+                    )
+
+                    LaunchedEffect(bitmap, imageType, containerSize) {
+                        if (containerSize.width > 0 && containerSize.height > 0) {
+                            scale = minScale
+                            offset = Offset.Zero
+                        }
+                    }
+
+                    val transformState = rememberTransformableState { zoomChange, panChange, _ ->
+                        val nextScale = (scale * zoomChange).coerceIn(minScale, 5f)
+                        val nextOffset = clampCropOffset(
+                            proposedOffset = offset + panChange,
+                            scale = nextScale,
+                            baseImageSize = baseImageSize,
+                            cropSize = Size(cropWidthPx, cropHeightPx)
+                        )
+                        scale = nextScale
+                        offset = nextOffset
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .transformable(state = transformState)
+                            .onSizeChanged { containerSize = it }
+                    ) {
+                        val scaledWidthDp = with(density) { (baseImageSize.width * scale).toDp() }
+                        val scaledHeightDp = with(density) { (baseImageSize.height * scale).toDp() }
+                        val offsetXDp = with(density) { offset.x.toDp() }
+                        val offsetYDp = with(density) { offset.y.toDp() }
+
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = null,
+                            contentScale = ContentScale.FillBounds,
+                            modifier = Modifier
+                                .align(Alignment.Center)
+                                .offset(x = offsetXDp, y = offsetYDp)
+                                .size(width = scaledWidthDp, height = scaledHeightDp)
+                        )
+
+                        Canvas(modifier = Modifier.matchParentSize()) {
+                            val cropLeft = (size.width - cropWidthPx) / 2f
+                            val cropTop = (size.height - cropHeightPx) / 2f
+                            val overlayColor = Color(0x88000000)
+                            drawRect(overlayColor, topLeft = Offset.Zero, size = Size(size.width, cropTop))
+                            drawRect(
+                                overlayColor,
+                                topLeft = Offset(0f, cropTop),
+                                size = Size(cropLeft, cropHeightPx)
+                            )
+                            drawRect(
+                                overlayColor,
+                                topLeft = Offset(cropLeft + cropWidthPx, cropTop),
+                                size = Size(size.width - cropLeft - cropWidthPx, cropHeightPx)
+                            )
+                            drawRect(
+                                overlayColor,
+                                topLeft = Offset(0f, cropTop + cropHeightPx),
+                                size = Size(size.width, size.height - cropTop - cropHeightPx)
+                            )
+                            drawRect(
+                                color = Color.White,
+                                topLeft = Offset(cropLeft, cropTop),
+                                size = Size(cropWidthPx, cropHeightPx),
+                                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f)
+                            )
+                        }
+                    }
+                }
+                Text(
+                    text = "支持双指缩放和拖动。营养成分表建议只框住表格主体。",
+                    fontSize = 12.sp,
+                    color = Color(0xFF8A92A1)
+                )
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Text(text = "取消", fontSize = 12.sp)
+                    }
+                    OutlinedButton(
+                        onClick = { onUseOriginal(bitmap) },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Text(text = "直接使用", fontSize = 12.sp)
+                    }
+                }
+                Button(
+                    onClick = {
+                        val croppedBitmap = cropBitmapFromViewport(
+                            bitmap = bitmap,
+                            containerSize = containerSize,
+                            cropAspectRatio = if (imageType == RecognitionImageType.NutritionLabel) 0.82f else 1f,
+                            cropScaleFactor = if (imageType == RecognitionImageType.NutritionLabel) 0.82f else 0.78f,
+                            scale = scale,
+                            offset = offset
+                        )
+                        onConfirmCrop(croppedBitmap ?: bitmap)
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Text(text = "确认截取并识别", fontSize = 14.sp)
+                }
+            }
+        }
+    }
+}
+
+fun bitmapFromUri(context: Context, uri: Uri, maxSide: Int = 2200): Bitmap? {
+    if (Build.VERSION.SDK_INT >= 28) {
+        runCatching {
+            val source = ImageDecoder.createSource(context.contentResolver, uri)
+            ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                val longestSide = max(info.size.width, info.size.height).coerceAtLeast(1)
+                if (longestSide > maxSide) {
+                    val scale = maxSide.toDouble() / longestSide.toDouble()
+                    decoder.setTargetSize(
+                        (info.size.width * scale).roundToInt().coerceAtLeast(1),
+                        (info.size.height * scale).roundToInt().coerceAtLeast(1)
+                    )
+                }
+            }
+        }.getOrNull()?.let { return it }
+    }
+
+    context.contentResolver.openFileDescriptor(uri, "r")?.use { descriptor ->
+        val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFileDescriptor(descriptor.fileDescriptor, null, boundsOptions)
+        val longestSide = max(boundsOptions.outWidth, boundsOptions.outHeight).coerceAtLeast(1)
+        var inSampleSize = 1
+        while (longestSide / inSampleSize > maxSide) {
+            inSampleSize *= 2
+        }
+        val decodeOptions = BitmapFactory.Options().apply { this.inSampleSize = inSampleSize.coerceAtLeast(1) }
+        BitmapFactory.decodeFileDescriptor(descriptor.fileDescriptor, null, decodeOptions)?.let { return it }
+    }
+
+    val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    context.contentResolver.openInputStream(uri)?.use { inputStream ->
+        BitmapFactory.decodeStream(inputStream, null, boundsOptions)
+    } ?: return null
+    val longestSide = max(boundsOptions.outWidth, boundsOptions.outHeight).coerceAtLeast(1)
+    var inSampleSize = 1
+    while (longestSide / inSampleSize > maxSide) {
+        inSampleSize *= 2
+    }
+    val decodeOptions = BitmapFactory.Options().apply { this.inSampleSize = inSampleSize.coerceAtLeast(1) }
+    return context.contentResolver.openInputStream(uri)?.use { inputStream ->
+        BitmapFactory.decodeStream(inputStream, null, decodeOptions)
+    }
+}
+
+fun createTempCameraImageUri(context: Context): Uri? {
+    return runCatching {
+        val imagesDir = File(context.cacheDir, "camera_images").apply { mkdirs() }
+        val imageFile = File.createTempFile("capture_", ".jpg", imagesDir)
+        FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", imageFile)
+    }.getOrNull()
+}
+
+fun fittedImageSize(
+    bitmapWidth: Float,
+    bitmapHeight: Float,
+    containerWidth: Float,
+    containerHeight: Float
+): Size {
+    if (bitmapWidth <= 0f || bitmapHeight <= 0f || containerWidth <= 0f || containerHeight <= 0f) {
+        return Size(1f, 1f)
+    }
+    val bitmapAspect = bitmapWidth / bitmapHeight
+    val containerAspect = containerWidth / containerHeight
+    return if (bitmapAspect >= containerAspect) {
+        Size(containerWidth, containerWidth / bitmapAspect)
+    } else {
+        Size(containerHeight * bitmapAspect, containerHeight)
+    }
+}
+
+fun clampCropOffset(
+    proposedOffset: Offset,
+    scale: Float,
+    baseImageSize: Size,
+    cropSize: Size
+): Offset {
+    val scaledWidth = baseImageSize.width * scale
+    val scaledHeight = baseImageSize.height * scale
+    val maxOffsetX = ((scaledWidth - cropSize.width) / 2f).coerceAtLeast(0f)
+    val maxOffsetY = ((scaledHeight - cropSize.height) / 2f).coerceAtLeast(0f)
+    return Offset(
+        x = proposedOffset.x.coerceIn(-maxOffsetX, maxOffsetX),
+        y = proposedOffset.y.coerceIn(-maxOffsetY, maxOffsetY)
+    )
+}
+
+fun cropBitmapFromViewport(
+    bitmap: Bitmap,
+    containerSize: IntSize,
+    cropAspectRatio: Float,
+    cropScaleFactor: Float,
+    scale: Float,
+    offset: Offset
+): Bitmap? {
+    if (containerSize.width <= 0 || containerSize.height <= 0) return null
+    val containerWidth = containerSize.width.toFloat()
+    val containerHeight = containerSize.height.toFloat()
+    val cropWidth = containerWidth * cropScaleFactor
+    val cropHeight = cropWidth / cropAspectRatio
+    val baseImageSize = fittedImageSize(
+        bitmapWidth = bitmap.width.toFloat(),
+        bitmapHeight = bitmap.height.toFloat(),
+        containerWidth = containerWidth,
+        containerHeight = containerHeight
+    )
+    val scaledWidth = baseImageSize.width * scale
+    val scaledHeight = baseImageSize.height * scale
+    val imageLeft = (containerWidth - scaledWidth) / 2f + offset.x
+    val imageTop = (containerHeight - scaledHeight) / 2f + offset.y
+    val cropLeft = (containerWidth - cropWidth) / 2f
+    val cropTop = (containerHeight - cropHeight) / 2f
+
+    val left = (((cropLeft - imageLeft) / scaledWidth) * bitmap.width).roundToInt().coerceIn(0, bitmap.width - 1)
+    val top = (((cropTop - imageTop) / scaledHeight) * bitmap.height).roundToInt().coerceIn(0, bitmap.height - 1)
+    val right = ((((cropLeft + cropWidth) - imageLeft) / scaledWidth) * bitmap.width).roundToInt().coerceIn(left + 1, bitmap.width)
+    val bottom = ((((cropTop + cropHeight) - imageTop) / scaledHeight) * bitmap.height).roundToInt().coerceIn(top + 1, bitmap.height)
+    val cropBitmapWidth = (right - left).coerceAtLeast(1)
+    val cropBitmapHeight = (bottom - top).coerceAtLeast(1)
+    return runCatching { Bitmap.createBitmap(bitmap, left, top, cropBitmapWidth, cropBitmapHeight) }.getOrNull()
+}
+
+fun imageDataUrlFromUri(context: Context, uri: Uri, imageType: RecognitionImageType = RecognitionImageType.FoodPhoto): String? {
+    val bitmap = bitmapFromUri(context, uri) ?: return null
+    return bitmapToRecognitionDataUrl(bitmap, imageType)
+}
+
 fun bitmapToJpegDataUrl(bitmap: Bitmap, maxSide: Int = 1024, quality: Int = 82): String {
     val longestSide = max(bitmap.width, bitmap.height).coerceAtLeast(1)
     val scaledBitmap = if (longestSide > maxSide) {
@@ -6334,14 +8627,25 @@ fun bitmapToJpegDataUrl(bitmap: Bitmap, maxSide: Int = 1024, quality: Int = 82):
     return "data:image/jpeg;base64,$base64"
 }
 
+fun bitmapToRecognitionDataUrl(
+    bitmap: Bitmap,
+    imageType: RecognitionImageType
+): String {
+    return if (imageType == RecognitionImageType.NutritionLabel) {
+        bitmapToJpegDataUrl(bitmap, maxSide = 1800, quality = 92)
+    } else {
+        bitmapToJpegDataUrl(bitmap, maxSide = 1280, quality = 85)
+    }
+}
+
 fun mockImageRecognitionCandidates(foodName: String): List<RecognizedFoodCandidate> {
     if (foodName.isNotBlank()) {
         val category = suggestFoodCategory(foodName)
         val baseFood = FoodItem(
             name = foodName.trim(),
-            protein = if (category == "肉蛋奶") 18 else 6,
-            fat = if (category == "零食") 16 else 5,
-            carbs = if (category == "主食") 28 else 12,
+            protein = if (category == "肉蛋奶") 18.0 else 6.0,
+            fat = if (category == "零食") 16.0 else 5.0,
+            carbs = if (category == "主食") 28.0 else 12.0,
             category = category
         )
         return listOf(
@@ -6350,27 +8654,27 @@ fun mockImageRecognitionCandidates(foodName: String): List<RecognizedFoodCandida
                 quantity = 150.0,
                 tags = suggestMealTags(baseFood.name, baseFood.calories, baseFood.protein, baseFood.fat, baseFood.carbs),
                 confidence = 0.52,
-                note = "本地规则根据食物名称生成，真实图片识别需启用 AI 设置"
+            note = "本地规则根据食物名称生成；要使用真实图片识别，请在 AI 设置里检测、启用并选为图片识别工作 AI"
             )
         )
     }
     return listOf(
         RecognizedFoodCandidate(
-            food = FoodItem(name = "米饭配鸡胸肉", protein = 12, fat = 3, carbs = 25, category = "AI 识别"),
+            food = FoodItem(name = "米饭配鸡胸肉", protein = 12.0, fat = 3.0, carbs = 25.0, category = "AI 识别"),
             quantity = 250.0,
             tags = listOf("正餐", "高蛋白"),
             confidence = 0.46,
-            note = "本地示例候选，启用真实 AI 后会根据照片内容识别"
+            note = "本地示例候选；在 AI 设置里检测、启用并选为图片识别工作 AI 后，会根据照片内容识别"
         ),
         RecognizedFoodCandidate(
-            food = FoodItem(name = "蔬菜沙拉", protein = 2, fat = 4, carbs = 8, category = "AI 识别"),
+            food = FoodItem(name = "蔬菜沙拉", protein = 2.0, fat = 4.0, carbs = 8.0, category = "AI 识别"),
             quantity = 180.0,
             tags = listOf("加餐", "低脂"),
             confidence = 0.42,
             note = "本地示例候选，请按实际照片确认"
         ),
         RecognizedFoodCandidate(
-            food = FoodItem(name = "拿铁咖啡", protein = 8, fat = 7, carbs = 14, servingType = ServingType.PerItem, category = "饮品"),
+            food = FoodItem(name = "拿铁咖啡", protein = 8.0, fat = 7.0, carbs = 14.0, servingType = ServingType.PerItem, category = "饮品"),
             quantity = 1.0,
             tags = listOf("饮品"),
             confidence = 0.38,
@@ -6382,17 +8686,17 @@ fun mockImageRecognitionCandidates(foodName: String): List<RecognizedFoodCandida
 fun mockRecognizedFoodCandidates(
     foodName: String,
     servingType: ServingType,
-    protein: Int,
-    fat: Int,
-    carbs: Int
+    protein: Double,
+    fat: Double,
+    carbs: Double
 ): List<RecognizedFoodCandidate> {
     val normalizedName = foodName.trim().ifBlank { "待识别食物" }
     val category = suggestFoodCategory(normalizedName)
     val baseFood = FoodItem(
         name = normalizedName,
-        protein = protein.coerceAtLeast(0),
-        fat = fat.coerceAtLeast(0),
-        carbs = carbs.coerceAtLeast(0),
+        protein = protein.coerceAtLeast(0.0),
+        fat = fat.coerceAtLeast(0.0),
+        carbs = carbs.coerceAtLeast(0.0),
         servingType = servingType,
         category = category
     )
@@ -6449,10 +8753,10 @@ fun suggestFoodCategory(foodName: String): String {
 
 fun suggestMealTags(
     foodName: String,
-    calories: Int,
-    protein: Int,
-    fat: Int,
-    carbs: Int
+    calories: Double,
+    protein: Double,
+    fat: Double,
+    carbs: Double
 ): List<String> {
     val tags = mutableListOf<String>()
     val category = suggestFoodCategory(foodName)
@@ -6470,13 +8774,144 @@ fun suggestMealTags(
     return tags.distinct()
 }
 
+fun toggleSelectableTag(currentTags: List<String>, clickedTag: String): List<String> {
+    return if (currentTags.contains(clickedTag)) {
+        currentTags.filter { it != clickedTag }
+    } else {
+        val filtered = if (clickedTag in MEAL_OCCASION_TAGS) {
+            currentTags.filter { it !in MEAL_OCCASION_TAGS }
+        } else {
+            currentTags
+        }
+        (filtered + clickedTag).distinct()
+    }
+}
+
+fun normalizeSelectableTags(tags: List<String>): List<String> {
+    val normalized = tags.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+    val chosenMealOccasion = normalized.firstOrNull { it in MEAL_OCCASION_TAGS }
+    return if (chosenMealOccasion == null) {
+        normalized
+    } else {
+        listOf(chosenMealOccasion) + normalized.filter { it !in MEAL_OCCASION_TAGS }
+    }
+}
+
+fun foodProfileMacroText(profile: FavoriteFoodProfile): String {
+    return "${servingTypeLabel(profile.servingType, profile.unitLabel)}：碳水${formatNumber(profile.carbsPerServing)}g · 蛋白${formatNumber(profile.proteinPerServing)}g"
+}
+
+fun foodProfileDisplayQuantity(profile: FavoriteFoodProfile, servingCount: Double): Double {
+    return if (profile.servingType == ServingType.PerItem) {
+        roundOneDecimal(servingCount)
+    } else {
+        roundOneDecimal(servingCount * 100.0)
+    }
+}
+
+fun mealToFavoriteFoodProfile(meal: MealRecord): FavoriteFoodProfile? {
+    if (meal.servingCount <= 0.0) return null
+    val carbsPerServing = roundOneDecimal(meal.carbs / meal.servingCount)
+    val proteinPerServing = roundOneDecimal(meal.protein / meal.servingCount)
+    val fatPerServing = roundOneDecimal(meal.fat / meal.servingCount)
+    if (carbsPerServing <= 0.0 && proteinPerServing <= 0.0) return null
+    return FavoriteFoodProfile(
+        name = meal.name.trim(),
+        category = suggestFoodCategory(meal.name),
+        servingType = meal.servingType,
+        unitLabel = normalizedUnitLabel(meal.servingType, meal.unitLabel),
+        carbsPerServing = carbsPerServing,
+        proteinPerServing = proteinPerServing,
+        fatPerServing = fatPerServing,
+        usageCount = 1,
+        totalQuantity = meal.quantity
+    )
+}
+
+fun inferFavoriteFoodProfiles(
+    mealHistory: List<MealRecord>,
+    targetCategory: String
+): List<FavoriteFoodProfile> {
+    return mealHistory
+        .mapNotNull(::mealToFavoriteFoodProfile)
+        .filter { profile ->
+            when (targetCategory) {
+                "主食" -> profile.category == "主食" && profile.carbsPerServing > 0.0
+                "肉蛋奶" -> {
+                    (profile.category == "肉蛋奶" || (profile.proteinPerServing >= 8.0 && profile.proteinPerServing >= profile.carbsPerServing)) &&
+                        profile.proteinPerServing > 0.0
+                }
+                else -> false
+            }
+        }
+        .groupBy { Triple(it.name, it.servingType, it.unitLabel) }
+        .map { (_, items) ->
+            FavoriteFoodProfile(
+                name = items.first().name,
+                category = items.first().category,
+                servingType = items.first().servingType,
+                unitLabel = items.first().unitLabel,
+                carbsPerServing = roundOneDecimal(items.map { it.carbsPerServing }.average()),
+                proteinPerServing = roundOneDecimal(items.map { it.proteinPerServing }.average()),
+                fatPerServing = roundOneDecimal(items.map { it.fatPerServing }.average()),
+                usageCount = items.size,
+                totalQuantity = roundOneDecimal(items.sumOf { it.totalQuantity })
+            )
+        }
+        .sortedWith(
+            compareByDescending<FavoriteFoodProfile> { it.usageCount }
+                .thenByDescending { it.totalQuantity }
+                .thenBy { it.name.length }
+        )
+}
+
+fun estimateRemainingFoodEquivalent(
+    mealHistory: List<MealRecord>,
+    remainingCarbs: Double,
+    remainingProtein: Double
+): RemainingFoodEquivalent? {
+    if (remainingCarbs <= 0.0 || remainingProtein <= 0.0) return null
+    val stapleCandidates = inferFavoriteFoodProfiles(mealHistory, "主食").take(8)
+    val proteinCandidates = inferFavoriteFoodProfiles(mealHistory, "肉蛋奶").take(8)
+    if (stapleCandidates.isEmpty() || proteinCandidates.isEmpty()) return null
+    val epsilon = 0.12
+    return stapleCandidates
+        .flatMap { staple ->
+            proteinCandidates.mapNotNull { proteinSource ->
+                val determinant = staple.carbsPerServing * proteinSource.proteinPerServing -
+                    proteinSource.carbsPerServing * staple.proteinPerServing
+                if (kotlin.math.abs(determinant) < 1e-6) return@mapNotNull null
+                val stapleServingCount = (remainingCarbs * proteinSource.proteinPerServing - remainingProtein * proteinSource.carbsPerServing) / determinant
+                val proteinServingCount = (remainingProtein * staple.carbsPerServing - remainingCarbs * staple.proteinPerServing) / determinant
+                if (stapleServingCount < 0.0 || proteinServingCount < 0.0) return@mapNotNull null
+                val totalCarbs = roundOneDecimal(stapleServingCount * staple.carbsPerServing + proteinServingCount * proteinSource.carbsPerServing)
+                val totalProtein = roundOneDecimal(stapleServingCount * staple.proteinPerServing + proteinServingCount * proteinSource.proteinPerServing)
+                if (kotlin.math.abs(totalCarbs - remainingCarbs) > epsilon || kotlin.math.abs(totalProtein - remainingProtein) > epsilon) return@mapNotNull null
+                RemainingFoodEquivalent(
+                    staple = staple,
+                    proteinSource = proteinSource,
+                    stapleServingCount = roundOneDecimal(stapleServingCount),
+                    proteinServingCount = roundOneDecimal(proteinServingCount),
+                    totalCarbs = totalCarbs,
+                    totalProtein = totalProtein
+                )
+            }
+        }
+        .sortedWith(
+            compareByDescending<RemainingFoodEquivalent> { it.staple.usageCount + it.proteinSource.usageCount }
+                .thenBy { it.stapleServingCount + it.proteinServingCount }
+                .thenByDescending { it.staple.totalQuantity + it.proteinSource.totalQuantity }
+        )
+        .firstOrNull()
+}
+
 fun mealAnalysisRiskText(
     foodName: String,
     quantity: Double,
-    calories: Int,
-    protein: Int,
-    fat: Int,
-    carbs: Int,
+    calories: Double,
+    protein: Double,
+    fat: Double,
+    carbs: Double,
     inputMode: NutritionInputMode
 ): String {
     if (foodName.isBlank()) return "建议先填写食物名称，再进行更有参考价值的分析。"
@@ -6492,7 +8927,7 @@ fun mealAnalysisRiskText(
 }
 
 fun groupMealsByPrimaryTag(meals: List<MealRecord>): List<Pair<String, List<MealRecord>>> {
-    val tagOrder = listOf("早餐", "午餐", "晚餐", "零食", "加餐")
+    val tagOrder = listOf("早餐", "午餐", "晚餐", "下午加餐", "夜宵", "零食", "加餐")
     val grouped = mutableMapOf<String, MutableList<MealRecord>>()
     meals.forEach { meal ->
         val primaryTag = meal.tags.firstOrNull { it in tagOrder }
@@ -6505,14 +8940,14 @@ fun groupMealsByPrimaryTag(meals: List<MealRecord>): List<Pair<String, List<Meal
         .map { it.key to it.value }
 }
 
-fun nutritionProgress(value: Int, target: Int): Float {
+fun nutritionProgress(value: Double, target: Double): Float {
     if (target <= 0) return 0f
     return (value.toFloat() / target.toFloat()).coerceIn(0f, 1f)
 }
 
-fun calorieStatusText(calories: Int, targetCalories: Int?): String {
+fun calorieStatusText(calories: Double, targetCalories: Double?): String {
     if (targetCalories == null || targetCalories <= 0) return "未设置热量目标"
-    if (calories == 0) return "未记录饮食"
+    if (calories == 0.0) return "未记录饮食"
     val ratio = calories.toFloat() / targetCalories.toFloat()
     return when {
         ratio < 0.6f -> "摄入不足"
@@ -6521,9 +8956,9 @@ fun calorieStatusText(calories: Int, targetCalories: Int?): String {
     }
 }
 
-fun calorieStatusColor(calories: Int, targetCalories: Int?): Color {
+fun calorieStatusColor(calories: Double, targetCalories: Double?): Color {
     if (targetCalories == null || targetCalories <= 0) return Color(0xFF8A92A1)
-    if (calories == 0) return Color(0xFF8A92A1)
+    if (calories == 0.0) return Color(0xFF8A92A1)
     val ratio = calories.toFloat() / targetCalories.toFloat()
     return when {
         ratio < 0.6f -> Color(0xFF29B6F6)
@@ -6532,17 +8967,24 @@ fun calorieStatusColor(calories: Int, targetCalories: Int?): Color {
     }
 }
 
-fun waterProgress(value: Int, target: Int): Float {
+fun waterProgress(value: Double, target: Double): Float {
     if (target <= 0) return 0f
     return (value.toFloat() / target.toFloat()).coerceIn(0f, 1f)
 }
 
 fun loadAppState(context: Context): AppState {
     val prefs = context.getSharedPreferences("calorie_free_state", Context.MODE_PRIVATE)
-    val targetCalories = prefs.getInt("targetCalories", 2000)
-    val targetProtein = prefs.getInt("targetProtein", 120)
-    val targetFat = prefs.getInt("targetFat", 65)
-    val targetCarbs = prefs.getInt("targetCarbs", 250)
+    val hasAnyStoredData = prefs.all.isNotEmpty()
+    val targetCalories = prefs.getString("targetCaloriesDecimal", null)?.toDoubleOrNull() ?: prefs.getInt("targetCalories", 2000).toDouble()
+    val targetProtein = prefs.getString("targetProteinDecimal", null)?.toDoubleOrNull() ?: prefs.getInt("targetProtein", 120).toDouble()
+    val targetFat = prefs.getString("targetFatDecimal", null)?.toDoubleOrNull() ?: prefs.getInt("targetFat", 65).toDouble()
+    val targetCarbs = prefs.getString("targetCarbsDecimal", null)?.toDoubleOrNull() ?: prefs.getInt("targetCarbs", 250).toDouble()
+    val userProfile = UserProfile(
+        heightCm = prefs.getString("userHeightCm", null)?.toDoubleOrNull() ?: 0.0,
+        weightKg = prefs.getString("userWeightKg", null)?.toDoubleOrNull() ?: 0.0,
+        ageYears = prefs.getInt("userAgeYears", 0),
+        biologicalSex = runCatching { BiologicalSex.valueOf(prefs.getString("userBiologicalSex", BiologicalSex.Female.name).orEmpty()) }.getOrDefault(BiologicalSex.Female)
+    )
     val mealsText = prefs.getString("meals", "").orEmpty()
     val meals = mealsText
         .lineSequence()
@@ -6555,7 +8997,7 @@ fun loadAppState(context: Context): AppState {
         .filter { it.isNotBlank() }
         .mapNotNull { line -> decodeFoodItem(line) }
         .toList()
-    val tagsText = prefs.getString("tags", "早餐\n午餐\n晚餐\n零食").orEmpty()
+    val tagsText = prefs.getString("tags", MEAL_OCCASION_TAGS.joinToString("\n")).orEmpty()
     val tags = tagsText.lineSequence().filter { it.isNotBlank() }.toList()
     val plansText = prefs.getString("plans", "").orEmpty()
     val plans = plansText
@@ -6594,6 +9036,8 @@ fun loadAppState(context: Context): AppState {
         targetProtein = targetProtein,
         targetFat = targetFat,
         targetCarbs = targetCarbs,
+        hasAnyStoredData = hasAnyStoredData,
+        userProfile = userProfile,
         meals = meals,
         foods = foods,
         tags = tags,
@@ -6608,10 +9052,11 @@ fun loadAppState(context: Context): AppState {
 
 fun saveAppState(
     context: Context,
-    targetCalories: Int,
-    targetProtein: Int,
-    targetFat: Int,
-    targetCarbs: Int,
+    targetCalories: Double,
+    targetProtein: Double,
+    targetFat: Double,
+    targetCarbs: Double,
+    userProfile: UserProfile = UserProfile(),
     meals: List<MealRecord>,
     foods: List<FoodItem>,
     tags: List<String>,
@@ -6633,10 +9078,14 @@ fun saveAppState(
     val aiSettingsListText = aiSettingsList.joinToString("\n") { encodeAiSettings(it) }
     context.getSharedPreferences("calorie_free_state", Context.MODE_PRIVATE)
         .edit()
-        .putInt("targetCalories", targetCalories)
-        .putInt("targetProtein", targetProtein)
-        .putInt("targetFat", targetFat)
-        .putInt("targetCarbs", targetCarbs)
+        .putString("targetCaloriesDecimal", targetCalories.toString())
+        .putString("targetProteinDecimal", targetProtein.toString())
+        .putString("targetFatDecimal", targetFat.toString())
+        .putString("targetCarbsDecimal", targetCarbs.toString())
+        .putString("userHeightCm", userProfile.heightCm.toString())
+        .putString("userWeightKg", userProfile.weightKg.toString())
+        .putInt("userAgeYears", userProfile.ageYears)
+        .putString("userBiologicalSex", userProfile.biologicalSex.name)
         .putString("meals", mealsText)
         .putString("foods", foodsText)
         .putString("tags", tagsText)
@@ -6661,7 +9110,9 @@ fun encodeAiSettings(settings: AiSettings): String {
         settings.selectedForVisionWork.toString(),
         settings.selectedForTextWork.toString(),
         settings.supportsVision.toString(),
-        settings.verifiedSignature.encodeStorageField()
+        settings.verifiedSignature.encodeStorageField(),
+        settings.manualVisionConfirmed.toString(),
+        settings.visionImageUploadFormat.name
     ).joinToString("|")
 }
 
@@ -6669,6 +9120,57 @@ fun decodeAiSettings(line: String): AiSettings? {
     if (line.isBlank()) return null
     val parts = line.split("|")
     return when {
+        parts.size >= 13 -> {
+            val supportsVision = parts[9].toBooleanStrictOrNull() ?: modelNameLooksVisionCapable(parts[4].decodeStorageField())
+            val manualVisionConfirmed = parts[11].toBooleanStrictOrNull() ?: false
+            val uploadFormat = parseVisionImageUploadFormatStoredValue(parts.getOrNull(12))
+            AiSettings(
+                id = parts[0].toLongOrNull() ?: 1L,
+                providerName = parts[1].decodeStorageField(),
+                baseUrl = parts[2].decodeStorageField(),
+                apiKey = parts[3].decodeStorageField(),
+                modelName = parts[4].decodeStorageField(),
+                temperature = parts[5].toDoubleOrNull() ?: 0.2,
+                enabled = parts[6].toBooleanStrictOrNull() ?: false,
+                selectedForVisionWork = (parts[7].toBooleanStrictOrNull() ?: false) && (supportsVision || manualVisionConfirmed),
+                selectedForTextWork = parts[8].toBooleanStrictOrNull() ?: false,
+                supportsVision = supportsVision,
+                verifiedSignature = parts.getOrNull(10)?.decodeStorageField().orEmpty(),
+                manualVisionConfirmed = manualVisionConfirmed,
+                visionImageUploadFormat = if (uploadFormat == VisionImageUploadFormat.Auto) {
+                    AiSettings(
+                        providerName = parts[1].decodeStorageField(),
+                        baseUrl = parts[2].decodeStorageField(),
+                        modelName = parts[4].decodeStorageField()
+                    ).resolvedVisionImageUploadFormat()
+                } else {
+                    uploadFormat
+                }
+            )
+        }
+        parts.size >= 12 -> {
+            val supportsVision = parts[9].toBooleanStrictOrNull() ?: modelNameLooksVisionCapable(parts[4].decodeStorageField())
+            val manualVisionConfirmed = parts[11].toBooleanStrictOrNull() ?: false
+            AiSettings(
+                id = parts[0].toLongOrNull() ?: 1L,
+                providerName = parts[1].decodeStorageField(),
+                baseUrl = parts[2].decodeStorageField(),
+                apiKey = parts[3].decodeStorageField(),
+                modelName = parts[4].decodeStorageField(),
+                temperature = parts[5].toDoubleOrNull() ?: 0.2,
+                enabled = parts[6].toBooleanStrictOrNull() ?: false,
+                selectedForVisionWork = (parts[7].toBooleanStrictOrNull() ?: false) && (supportsVision || manualVisionConfirmed),
+                selectedForTextWork = parts[8].toBooleanStrictOrNull() ?: false,
+                supportsVision = supportsVision,
+                verifiedSignature = parts.getOrNull(10)?.decodeStorageField().orEmpty(),
+                manualVisionConfirmed = manualVisionConfirmed,
+                visionImageUploadFormat = AiSettings(
+                    providerName = parts[1].decodeStorageField(),
+                    baseUrl = parts[2].decodeStorageField(),
+                    modelName = parts[4].decodeStorageField()
+                ).resolvedVisionImageUploadFormat()
+            )
+        }
         parts.size >= 10 -> {
             val supportsVision = parts[9].toBooleanStrictOrNull() ?: modelNameLooksVisionCapable(parts[4].decodeStorageField())
             AiSettings(
@@ -6751,7 +9253,7 @@ fun decodeWaterRecord(line: String): WaterRecord? {
         WaterRecord(
             id = parts[0].toLongOrNull() ?: return null,
             date = parts[1].decodeStorageField(),
-            amountMl = parts[2].toIntOrNull() ?: return null
+            amountMl = parts[2].toDoubleOrNull() ?: return null
         )
     } else {
         null
@@ -6771,7 +9273,7 @@ fun decodeExerciseBurnRecord(line: String): ExerciseBurnRecord? {
     return if (parts.size >= 2) {
         ExerciseBurnRecord(
             date = parts[0].decodeStorageField(),
-            calories = parts[1].toIntOrNull() ?: return null,
+            calories = parts[1].toDoubleOrNull() ?: return null,
             description = parts.getOrNull(2)?.decodeStorageField().orEmpty()
         )
     } else {
@@ -6790,36 +9292,53 @@ fun encodeNutritionPlan(plan: NutritionPlan): String {
         plan.waterTargetMl.toString(),
         plan.dailyCalorieDeficit.toString(),
         plan.isDefault.toString(),
+        plan.isHidden.toString(),
         plan.note.encodeStorageField()
     ).joinToString("|")
 }
 
 fun decodeNutritionPlan(line: String): NutritionPlan? {
     val parts = line.split("|")
-    return if (parts.size >= 10) {
+    return if (parts.size >= 11) {
         NutritionPlan(
             id = parts[0].toLongOrNull() ?: return null,
             name = parts[1].decodeStorageField(),
-            targetCalories = parts[2].toIntOrNull() ?: return null,
-            targetProtein = parts[3].toIntOrNull() ?: return null,
-            targetFat = parts[4].toIntOrNull() ?: return null,
-            targetCarbs = parts[5].toIntOrNull() ?: return null,
-            waterTargetMl = parts[6].toIntOrNull() ?: 2000,
-            dailyCalorieDeficit = parts[7].toIntOrNull() ?: 0,
+            targetCalories = parts[2].toDoubleOrNull() ?: return null,
+            targetProtein = parts[3].toDoubleOrNull() ?: return null,
+            targetFat = parts[4].toDoubleOrNull() ?: return null,
+            targetCarbs = parts[5].toDoubleOrNull() ?: return null,
+            waterTargetMl = parts[6].toDoubleOrNull() ?: 2000.0,
+            dailyCalorieDeficit = parts[7].toDoubleOrNull() ?: 0.0,
             isDefault = parts[8].toBooleanStrictOrNull() ?: false,
+            isHidden = parts[9].toBooleanStrictOrNull() ?: false,
+            note = parts[10].decodeStorageField()
+        )
+    } else if (parts.size >= 10) {
+        NutritionPlan(
+            id = parts[0].toLongOrNull() ?: return null,
+            name = parts[1].decodeStorageField(),
+            targetCalories = parts[2].toDoubleOrNull() ?: return null,
+            targetProtein = parts[3].toDoubleOrNull() ?: return null,
+            targetFat = parts[4].toDoubleOrNull() ?: return null,
+            targetCarbs = parts[5].toDoubleOrNull() ?: return null,
+            waterTargetMl = parts[6].toDoubleOrNull() ?: 2000.0,
+            dailyCalorieDeficit = parts[7].toDoubleOrNull() ?: 0.0,
+            isDefault = parts[8].toBooleanStrictOrNull() ?: false,
+            isHidden = false,
             note = parts[9].decodeStorageField()
         )
     } else if (parts.size >= 9) {
         NutritionPlan(
             id = parts[0].toLongOrNull() ?: return null,
             name = parts[1].decodeStorageField(),
-            targetCalories = parts[2].toIntOrNull() ?: return null,
-            targetProtein = parts[3].toIntOrNull() ?: return null,
-            targetFat = parts[4].toIntOrNull() ?: return null,
-            targetCarbs = parts[5].toIntOrNull() ?: return null,
-            waterTargetMl = parts[6].toIntOrNull() ?: 2000,
-            dailyCalorieDeficit = 0,
+            targetCalories = parts[2].toDoubleOrNull() ?: return null,
+            targetProtein = parts[3].toDoubleOrNull() ?: return null,
+            targetFat = parts[4].toDoubleOrNull() ?: return null,
+            targetCarbs = parts[5].toDoubleOrNull() ?: return null,
+            waterTargetMl = parts[6].toDoubleOrNull() ?: 2000.0,
+            dailyCalorieDeficit = 0.0,
             isDefault = parts[7].toBooleanStrictOrNull() ?: false,
+            isHidden = false,
             note = parts[8].decodeStorageField()
         )
     } else {
@@ -6846,6 +9365,23 @@ fun decodeDailyPlanSelection(line: String): DailyPlanSelection? {
     }
 }
 
+fun inferLegacyMealOccasionTag(timeText: String): String {
+    val hour = Regex("""(\d{1,2})""")
+        .find(timeText)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.toIntOrNull()
+        ?: return "加餐"
+    return when (hour) {
+        in 5..10 -> "早餐"
+        in 11..14 -> "午餐"
+        in 15..17 -> "下午加餐"
+        in 18..20 -> "晚餐"
+        in 21..23, 0, 1, 2, 3, 4 -> "夜宵"
+        else -> "加餐"
+    }
+}
+
 fun encodeMealRecord(meal: MealRecord): String {
     return listOf(
         meal.name.encodeStorageField(),
@@ -6858,7 +9394,8 @@ fun encodeMealRecord(meal: MealRecord): String {
         meal.servingType.name,
         meal.quantity.toString(),
         meal.servingCount.toString(),
-        meal.tags.joinToString(",") { it.encodeStorageField() }.encodeStorageField()
+        meal.tags.joinToString(",") { it.encodeStorageField() }.encodeStorageField(),
+        meal.unitLabel.encodeStorageField()
     ).joinToString("|")
 }
 
@@ -6867,13 +9404,14 @@ fun decodeMealRecord(line: String): MealRecord? {
     return when (parts.size) {
         6 -> MealRecord(
             name = parts[0].decodeStorageField(),
-            calories = parts[1].toIntOrNull() ?: return null,
-            protein = parts[2].toIntOrNull() ?: return null,
-            fat = parts[3].toIntOrNull() ?: return null,
-            carbs = parts[4].toIntOrNull() ?: return null,
-            time = parts[5].decodeStorageField()
+            calories = parts[1].toDoubleOrNull() ?: return null,
+            protein = parts[2].toDoubleOrNull() ?: return null,
+            fat = parts[3].toDoubleOrNull() ?: return null,
+            carbs = parts[4].toDoubleOrNull() ?: return null,
+            time = parts[5].decodeStorageField(),
+            tags = listOf(inferLegacyMealOccasionTag(parts[5].decodeStorageField()))
         )
-        10, 11 -> {
+        10, 11, 12 -> {
             val type = runCatching { ServingType.valueOf(parts[7]) }.getOrDefault(ServingType.Per100g)
             val oldAmountOrQuantity = parts[8].toDoubleOrNull() ?: if (type == ServingType.PerItem) 1.0 else 100.0
             val oldServingCount = parts[9].toDoubleOrNull() ?: 1.0
@@ -6889,20 +9427,22 @@ fun decodeMealRecord(line: String): MealRecord? {
                     .map { it.decodeStorageField().trim() }
                     .filter { it.isNotBlank() }
             } else {
-                listOf("早餐")
+                listOf(inferLegacyMealOccasionTag(parts[5].decodeStorageField()))
             }
+            val unitLabel = parts.getOrNull(11)?.decodeStorageField()?.takeIf { it.isNotBlank() }
             MealRecord(
                 name = parts[0].decodeStorageField(),
-                calories = parts[1].toIntOrNull() ?: return null,
-                protein = parts[2].toIntOrNull() ?: return null,
-                fat = parts[3].toIntOrNull() ?: return null,
-                carbs = parts[4].toIntOrNull() ?: return null,
+                calories = parts[1].toDoubleOrNull() ?: return null,
+                protein = parts[2].toDoubleOrNull() ?: return null,
+                fat = parts[3].toDoubleOrNull() ?: return null,
+                carbs = parts[4].toDoubleOrNull() ?: return null,
                 time = parts[5].decodeStorageField(),
                 date = parts[6].decodeStorageField(),
                 tags = storedTags,
                 servingType = type,
                 quantity = quantity,
-                servingCount = servingCountFromQuantity(quantity, type)
+                servingCount = servingCountFromQuantity(quantity, type),
+                unitLabel = normalizedUnitLabel(type, unitLabel)
             )
         }
         else -> null
@@ -6916,7 +9456,9 @@ fun encodeFoodItem(food: FoodItem): String {
         food.fat.toString(),
         food.carbs.toString(),
         food.servingType.name,
-        food.category.encodeStorageField()
+        food.category.encodeStorageField(),
+        food.unitLabel.encodeStorageField(),
+        food.isHidden.toString()
     ).joinToString("|")
 }
 
@@ -6925,17 +9467,23 @@ fun decodeFoodItem(line: String): FoodItem? {
     return when (parts.size) {
         4 -> FoodItem(
             name = parts[0].decodeStorageField(),
-            protein = parts[1].toIntOrNull() ?: return null,
-            fat = parts[2].toIntOrNull() ?: return null,
-            carbs = parts[3].toIntOrNull() ?: return null
+            protein = parts[1].toDoubleOrNull() ?: return null,
+            fat = parts[2].toDoubleOrNull() ?: return null,
+            carbs = parts[3].toDoubleOrNull() ?: return null,
+            category = suggestFoodCategory(parts[0].decodeStorageField())
         )
-        5, 6 -> FoodItem(
+        5, 6, 7, 8 -> FoodItem(
             name = parts[0].decodeStorageField(),
-            protein = parts[1].toIntOrNull() ?: return null,
-            fat = parts[2].toIntOrNull() ?: return null,
-            carbs = parts[3].toIntOrNull() ?: return null,
+            protein = parts[1].toDoubleOrNull() ?: return null,
+            fat = parts[2].toDoubleOrNull() ?: return null,
+            carbs = parts[3].toDoubleOrNull() ?: return null,
             servingType = runCatching { ServingType.valueOf(parts[4]) }.getOrDefault(ServingType.Per100g),
-            category = parts.getOrNull(5)?.decodeStorageField()?.takeIf { it.isNotBlank() } ?: "自定义"
+            category = parts.getOrNull(5)?.decodeStorageField()?.takeIf { it.isNotBlank() } ?: suggestFoodCategory(parts[0].decodeStorageField()),
+            unitLabel = normalizedUnitLabel(
+                runCatching { ServingType.valueOf(parts[4]) }.getOrDefault(ServingType.Per100g),
+                parts.getOrNull(6)?.decodeStorageField()
+            ),
+            isHidden = parts.getOrNull(7)?.toBooleanStrictOrNull() ?: false
         )
         else -> null
     }
@@ -6955,17 +9503,30 @@ fun String.decodeStorageField(): String {
         .replace("%25", "%")
 }
 
-fun foodServingText(food: FoodItem): String {
-    return if (food.servingType == ServingType.PerItem) {
-        "每个"
+fun normalizedUnitLabel(servingType: ServingType, unitLabel: String?): String {
+    return if (servingType == ServingType.PerItem) {
+        unitLabel?.trim().takeUnless { it.isNullOrBlank() } ?: "个"
     } else {
-        "每100g"
+        "g"
     }
 }
 
+fun quantityUnitText(servingType: ServingType, unitLabel: String?): String {
+    return if (servingType == ServingType.PerItem) {
+        normalizedUnitLabel(servingType, unitLabel)
+    } else {
+        "g"
+    }
+}
+
+fun foodServingText(food: FoodItem): String {
+    return servingTypeLabel(food.servingType, food.unitLabel)
+}
+
 fun mealAmountText(meal: MealRecord): String {
+    if (meal.quantity <= 0.0 || meal.servingCount <= 0.0) return "未填写分量"
     return if (meal.servingType == ServingType.PerItem) {
-        "${formatServingCount(meal.quantity)} 个"
+        "${formatServingCount(meal.quantity)} ${normalizedUnitLabel(meal.servingType, meal.unitLabel)}"
     } else {
         "${formatServingCount(meal.quantity)} g"
     }
@@ -6979,8 +9540,8 @@ fun servingCountFromQuantity(quantity: Double, servingType: ServingType): Double
     }
 }
 
-fun servingTypeLabel(servingType: ServingType): String {
-    return if (servingType == ServingType.PerItem) "每个" else "每100g"
+fun servingTypeLabel(servingType: ServingType, unitLabel: String? = null): String {
+    return if (servingType == ServingType.PerItem) "每${normalizedUnitLabel(servingType, unitLabel)}" else "每100g"
 }
 
 fun formatServingCount(value: Double): String {
@@ -7067,7 +9628,7 @@ fun targetCaloriesForDate(
     date: String,
     plans: List<NutritionPlan>,
     dailyPlanSelections: List<DailyPlanSelection>
-): Int? {
+): Double? {
     return planForDate(date, plans, dailyPlanSelections)?.targetCalories
 }
 

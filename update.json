@@ -1,6 +1,6 @@
 {
-  "versionCode": 1,
-  "versionName": "1.0",
+  "versionCode": 3,
+  "versionName": "1.1",
   "url": "https://github.com/guaidaojide666/CalorieFree/releases/latest",
-  "changelog": "首次发布"
+  "changelog": "修复了海量bug，加入了丝滑动画，使界面更人性化"
 }
